@@ -1,4 +1,4 @@
-//Goes in a straight line, uses NavX MXP, Back Encoders
+//Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
 //system
 #define LED_PIN 13
@@ -39,7 +39,7 @@ Motor *motor;
 #include <PWMServo.h>
 
 PWMServo myservo;  // create servo object to control a servo
-#define SERVO_PIN 6
+#define SERVO_PIN 9
 
 #define SERVO_PWM_MIN 0
 #define SERVO_PWM_MAX 180
@@ -249,7 +249,7 @@ void Robot::setupNavX(void){
   SPI.begin();
   SPI.setBitOrder(MSBFIRST);
   SPI.setDataMode(SPI_MODE3);
-  SPI.setClockDivider(64); /* 16Mhz/32 = 500kHz; /16=1Mhz; /8=2Mhz */ 
+  SPI.setClockDivider(128); /* 16Mhz/32 = 500kHz; /16=1Mhz; /8=2Mhz */ 
 }
 
 void Robot::pollNavX(void){
@@ -431,79 +431,180 @@ void Robot::logEncoderVelocities(void){
 
 Robot *vehicle;
 
-//trapezoidal velocity
-class trapVelProfile{
+
+//Splines
+#define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
+
+#define SEGMENTS 2 //start -> p1 -> p2
+
+//spline data format is x0 , x1, y0, y1, v_x0, v_x1, v_y0, v_y1
+
+float spline_data[SEGMENTS*4] = {0.0, 0.0, 
+                                 0.5, 1.0,
+                                 0.0, 0.0,
+                                 0.5, 0.0};
+
+//e.g.  d(4, 1) means d_y at the 4th segment
+
+class Splines{
   public:
-    trapVelProfile(double x1, double x2, double x3, double xf, int maxPWM, int minPWM);
-    //accelarates from 0 to x1
-    //max speed from x1 to x2
-    //negative accelarates from x2 to x3
-    //coasts to stop, then min PWM until xf
-    int getPWM(Robot *robot);
+    Splines(void);
+
+    void loadSplineData(float *spline_data);
+  
+    //this defines n-1 SEGMENTS [1,n-1]
+    
+    void printData(void);
+
+    float v_f(int seg, int axis);
+    float v_i(int seg, int axis);
+    float r_f(int seg, int axis);
+    float r_i(int seg, int axis);
+
+    float a(int seg, int axis);
+    float b(int seg, int axis);
+    float c(int seg, int axis);
+    float d(int seg, int axis);
+    
+    float x(int seg, float t);
+    float y(int seg, float t);
+
+    bool closeTo(float x0, float y0, float x1, float y1);
+
+    int getCurrentSegment(void);
+    void nextSegment(void);
+
   private:
-    double _x1;
-    double _x2;
-    double _x3;
-    double _xf;
-    int _maxPWM;
-    int _minPWM;
-    bool _firstStopped;
+    float *x_vels;
+    float *y_vels;
+    float *x_pos;
+    float *y_pos;
+
+    int curr_segment;//goes from 1,2,3...n
     
 };
 
-trapVelProfile::trapVelProfile(double x1, double x2, double x3, double xf, int maxPWM, int minPWM){
-  this->_x1 = x1;
-  this->_x2 = x2;
-  this->_x3 = x3;
-  this->_xf = xf;
+Splines::Splines(void){
+  this->x_vels = new float[SEGMENTS];
+  this->y_vels = new float[SEGMENTS];
+  this->x_pos = new float[SEGMENTS];
+  this->y_pos = new float[SEGMENTS];
 
-  this->_maxPWM = maxPWM;
-  this->_minPWM = minPWM;
-
-  this->_firstStopped = false;
+  this->curr_segment = 1;
 }
 
-int trapVelProfile::getPWM(Robot *robot){
+void Splines::loadSplineData(float *spline_data){
+  
+  for(int i = 0; i<SEGMENTS; i++){
+    this->x_pos[i] = spline_data[i];
+    this->y_pos[i] = spline_data[SEGMENTS + i];
 
-  int Pwm;
-  
-  double meters = robot->getY();
-  
-  if(meters <= this->_x1){
-    Pwm = (int)((this->_maxPWM - this->_minPWM)  / this->_x1 * meters + this->_minPWM);
-  }else if(meters <= this->_x2){
-    Pwm = this->_maxPWM;
-  }else if(meters <= this->_x3){
-    Pwm = (int)((-this->_maxPWM)  / (this->_x3 - this->_x2) * meters + this->_maxPWM);
-  }else if(meters <= this->_xf){
-    if(robot->getRobotVel() <= 0.08){//
-      this->_firstStopped = true;
-    }
-    
-    if(this->_firstStopped){//meters/sec
-      Pwm = 50;
-    }else{
-      Pwm = 0;  
-    }//else keep coasting
-  }else{//if went beyond point...then all hope is lost because we're not allowed to go backward
-    Pwm = 0;
+    this->x_vels[i] = spline_data[SEGMENTS*2 + i];
+    this->y_vels[i] = spline_data[SEGMENTS*3 + i];
   }
-
-  Serial.print("PWM: ");
-  Serial.println(Pwm);
-
-  return Pwm;
 }
 
-trapVelProfile *velProfile;
+void Splines::printData(void){
+  Serial.println("x_vel[i] | y_vel[i] | x_pos[i] | y_pos[i]");
+  for(int i=0;i<SEGMENTS;i++){
+    Serial.print(this->x_vels[i]);
+    Serial.print(" | ");
+    Serial.print(this->y_vels[i]);
+    Serial.print(" | ");
+    Serial.print(this->x_pos[i]);
+    Serial.print(" | ");
+    Serial.print(this->y_pos[i]);
+    Serial.print("\n");
+  }
+}
 
-#define BEGIN_MAX_PWM 1.5
-#define END_MAX_PWM 3
-#define BEGIN_COASTING 4.5
-#define TARGET_POINT 5.5 //78cm l 17cm b
+float Splines::v_f(int seg, int axis){
+  if(axis==1){
+    return this->y_vels[seg];
+  }else{
+    return this->x_vels[seg]; 
+  }
+}
+float Splines::v_i(int seg, int axis){
+  if(axis==1){
+    return this->y_vels[seg-1];
+  }else{
+    return this->x_vels[seg-1]; 
+  }
+}
 
+float Splines::r_f(int seg, int axis){
+  if(axis==1){
+    return this->y_pos[seg];
+  }else{
+    return this->x_pos[seg]; 
+  }  
+}
 
-//
+float Splines::r_i(int seg, int axis){
+  if(axis==1){
+    return this->y_pos[seg-1];
+  }else{
+    return this->x_pos[seg-1]; 
+  }
+}
+
+float Splines::a(int seg, int axis){
+  return this->v_f(seg, axis) + this->v_i(seg,axis) -2*(this->r_f(seg, axis)) + 2*(this->r_i(seg, axis));
+}
+
+float Splines::b(int seg, int axis){
+  return -(this->v_f(seg,axis)) -2*(this->v_i(seg,axis)) + 3*(this->r_f(seg,axis)) -3*(this->r_i(seg,axis));
+}
+
+float Splines::c(int seg, int axis){
+  return this->v_i(seg, axis);  
+}
+
+float Splines::d(int seg, int axis){
+  return this->r_i(seg, axis);
+}
+
+//this is what the user cares about
+float Splines::x(int seg, float t){//t must be between 0.0 and 1.0
+  if((t < 0.0 ) || (t > 1.0)){
+    Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
+  }
+  return this->a(seg,0)*(t*t*t) + this->b(seg,0)*(t*t) + this->c(seg,0)*(t) + this->d(seg,0);
+}
+
+float Splines::y(int seg, float t){//t must be between 0.0 and 1.0
+ if((t < 0.0 ) || (t > 1.0)){
+  Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
+ }
+ return this->a(seg,1)*(t*t*t) + this->b(seg,1)*(t*t) + this->c(seg,1)*(t) + this->d(seg,1);
+}
+
+bool Splines::closeTo(float x0, float y0, float x1, float y1){
+  return sqrt((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0)) < SPLINE_DISTANCE_TOLERANCE;
+}
+
+int Splines::getCurrentSegment(void){
+  return this->curr_segment;
+}
+
+void Splines::nextSegment(void){
+  this->curr_segment++;
+}
+
+//math
+
+int signum(float x){
+  if(x>0){
+    return 1;
+  }else if(x<0){
+    return -1;
+  }else{
+    return 0;  
+  }    
+}
+
+Splines *spline;
 
 void setup() {
   Serial.begin(9600);
@@ -517,7 +618,11 @@ void setup() {
   
   vehicle = new Robot();
 
-  velProfile = new trapVelProfile(BEGIN_MAX_PWM, END_MAX_PWM, BEGIN_COASTING, TARGET_POINT, 100, 70);
+  spline = new Splines();
+  spline->loadSplineData(spline_data);
+
+  
+  
 
   //Wait for NavX to Calibrate
   Serial.println("Waiting for NavX...");
@@ -548,11 +653,20 @@ void setup() {
   Serial.println("NAVX_OP_STATUS_NORMAL");
   
   //navx operation normal, wait for human//TODO change this to wait for calibration finish
+
+  Serial.print("spline Ys");
+  Serial.print(spline->y(0, 1.0));
+  Serial.print(" ");
+  Serial.println(spline->y(1, 1.0));
+
   
   pinMode(SWITCH_PIN, INPUT); 
-  Serial.println("Waiting for User Button...");
+
+
+  
   while(!digitalRead(SWITCH_PIN)){
-    delay(50);
+    Serial.println("Waiting for User Button...");
+    delay(100);
   }
   delay(1000);
   Serial.println("Started");
@@ -560,30 +674,82 @@ void setup() {
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
 }
 
-void loop() {
-  
-  delay(100);
-  digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
-  
-  if(vehicle->getY() <= TARGET_POINT){
-    motor->mSpeed(velProfile->getPWM(vehicle));
-  }else{
-    motor->mBreak();
-  }
-  
-  //front_servo->angle(PI/6);
+bool first_finished_flag = false;
 
- //very occaisionally get CRC errors
+//using y as the internal parameter
+double startY = 0;
+
+void loop(){
+  
+  delay(50);
+  digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
+  //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  vehicle->logPose();
+  //vehicle->logPose();
 
   checkEncoderZeroVelocities(&front_enc, 4);
   checkEncoderZeroVelocities(&r_enc, 4);
   checkEncoderZeroVelocities(&l_enc, 4);
+
+  //spline code goes here
+
+  int currSeg = spline->getCurrentSegment();
+  Serial.print("segment: ");
+  Serial.println(currSeg);
+  if(currSeg <= SEGMENTS){
+
+    motor->mSpeed(60);
   
-  vehicle->logEncoders();
-  vehicle->logEncoderVelocities();
+    double x = vehicle->getX();
+    double y = vehicle->getY();
+
+    double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
+    
+    Serial.print("y, splineY, startY: ");
+    
+    Serial.print(y);
+    Serial.print(" ");
+    
+    Serial.print(spline->y(currSeg, 1.0));//TODO: find out why this isn't changing...
+    Serial.print(" ");
+    
+    Serial.println(startY);
+    
+    Serial.print("segmentProgress: ");
+    Serial.println(segmentProgress);
+    double xDesired = spline->x(currSeg, segmentProgress);
+    Serial.print("splineX: ");
+    Serial.println(xDesired);
+
+
+
+    
+    double errorX = x - xDesired;
+  
+    double angleDesired = atan(-errorX / 0.05);// switch the axes , looking 0.05 m ahead y direction
+  
+    if(abs(angleDesired - vehicle->getPhi()) > PI/64){
+      //front_servo->angle(signum(angleDesired)*max(abs(angleDesired), STEERING_SWEEP/2-0.1));
+    }
+  
+    //checking
+    if( spline->y(currSeg, 1.0) - y <= 0.05){
+      currSeg++;
+      startY = y;
+    }
+  }else{//finished entire spline
+    if(!first_finished_flag){
+      motor->mSpeed(0);
+      motor->mBreak();
+      Serial.println("finished spline!");   
+      first_finished_flag = true;
+    }
+  }
+  
+  
+  //vehicle->logEncoders();
+  //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
   
