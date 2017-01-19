@@ -81,7 +81,7 @@ servo *front_servo;
 #define ENCODER_BACK_RESOLUTION 250 //ticks
 #define WHEEL_BACK_DIAMETER 0.09 //meters
 #define WHEEL_BACK_CIRCUMFERENCE  PI*WHEEL_BACK_DIAMETER //meters
-#define METERS_PER_TICK_BACK WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
+#define METERS_PER_TICK_BACK 0.001152//WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
 
 //hall sensor
 #include <ADC.h>
@@ -447,13 +447,20 @@ Robot *vehicle;
 //Splines
 #define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
 
+
+
+
 #define SEGMENTS 2 //p1 -> p2 -> p3 defined to be (number of points - 1)
 #define POINTS 3
 
 //spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
 
-float spline_data[POINTS*4] = {0.0, 0.85, 0.0+0.04,
-                               0.0, 3.0, 6.0-0.41,
+#define TARGET_DISTANCE 10.0
+#define CAN_DISTANCE 0.3
+#define BIAS 0.05
+
+float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
+                               0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
                                0.0, 0.0, 0.0,
                                0.0, 2.0, 0.0};
 
@@ -687,6 +694,11 @@ double startY = 0;
 
 double prevError=0;
 
+const float K_p = 3;
+const float K_d = 1;
+
+int motorSpeed = 55;
+
 void loop(){
   
   delay(20);
@@ -694,7 +706,7 @@ void loop(){
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  //vehicle->logPose();
+  vehicle->logPose();
 
   checkEncoderZeroVelocities(&front_enc, 4);
   checkEncoderZeroVelocities(&r_enc, 4);
@@ -709,19 +721,23 @@ void loop(){
   int currSeg = spline->getCurrentSegment();
   
   if(currSeg <= SEGMENTS && !first_finished_flag){
-
-    motor->mSpeed(55);
   
     double x = vehicle->getX();
     double y = vehicle->getY();
     double theta = vehicle->getTheta();
 
+    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < 0.35){//if on last segment and almost reached goal
+      motor->mBreak();
+    }else{
+      motor->mSpeed(55);
+    }
+
     double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
-    Serial.print("segment: ");
-    Serial.println(currSeg);
+    //Serial.print("segment: ");
+    //Serial.println(currSeg);
     
-    Serial.print("segmentProgress: ");
-    Serial.println(segmentProgress);
+    //Serial.print("segmentProgress: ");
+    //Serial.println(segmentProgress);
     double xDesired = spline->x(currSeg, segmentProgress);
 
     double errorX = x - xDesired;
@@ -730,17 +746,17 @@ void loop(){
 
     prevError = errorX;
   
-    double angleDesired = -5.0*errorX - 1.0*dError + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
+    double angleDesired = -(K_p*errorX + K_d*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
 
     //right positive
 
-    Serial.print("corrected theta: ");
-    Serial.println(theta - PI/2);
+    //Serial.print("corrected theta: ");
+    //Serial.println(theta - PI/2);
     
    
     //double correctedAngle = signum(angleDesired)*max(abs(angleDesired), STEERING_SWEEP/2-0.1);
-    Serial.print("steer angle(deg): ");
-    Serial.println(angleDesired*180.0/PI);
+    //Serial.print("steer angle(deg): ");
+    //Serial.println(angleDesired*180.0/PI);
     front_servo->angle(angleDesired);
   
     //checking
@@ -751,11 +767,6 @@ void loop(){
   }else{//finished entire spline
     finished();
   }
-
-  vehicle->logPose();
-  
-  
-  //vehicle->logEncoders();
   //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
