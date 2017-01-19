@@ -1,7 +1,6 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
 //system
-#define LED_PIN 13
 #define SWITCH_PIN 22
 
 //motor
@@ -36,10 +35,9 @@ void Motor::mSpeed(int PWM){
 Motor *motor;
 
 //servo
-#include <PWMServo.h>
+#include <Servo.h>
 
-PWMServo myservo;  // create servo object to control a servo
-#define SERVO_PIN 9
+#define SERVO_PIN 6
 
 #define SERVO_PWM_MIN 0
 #define SERVO_PWM_MAX 180
@@ -52,17 +50,19 @@ class servo{
     servo(void);
     void angle(float ang);
   private:
-    PWMServo *servoobj;
+    Servo *servoobj;
 };
 
 servo::servo(void){
-  this->servoobj = new PWMServo();
+  this->servoobj = new Servo();
   this->servoobj->attach(SERVO_PIN);  // attaches the servo on pin 9 to the servo object
   this->servoobj->attach(SERVO_PIN, 1000, 2000); // some motors need min/max setting
 }
 
+#define SERVO_OFFSET 21
+
 void servo::angle(float ang){
-  this->servoobj->write((int)PWM_ANGLE_TO_MEASURE(ang));
+  this->servoobj->write((int)(PWM_ANGLE_TO_MEASURE(ang) - SERVO_OFFSET));
 }
 
 servo *front_servo;
@@ -220,6 +220,11 @@ class Robot{
     struct encoder *_r_enc;
     struct encoder *_l_enc;
 };
+
+bool first_finished_flag = false;
+void finished(void);
+
+
 Robot::Robot(void){
 
   front_hall = new Hall();
@@ -253,34 +258,41 @@ void Robot::setupNavX(void){
 }
 
 void Robot::pollNavX(void){
-  uint8_t spi_crc;
-  uint8_t spi_data[3];
-
-  // Transmit SPI data
-  spi_data[0] = 0;   // Start register address (high bit clear == read)
-  spi_data[1] = 32; // Number of bytes to read
-  spi_data[2] = IMURegisters::getCRC(spi_data,2);
+  int crc_count = 0;
   
-  digitalWrite(SS, LOW);
+  if(crc_count <= 3){
+    uint8_t spi_crc;
+    uint8_t spi_data[3];
   
-  for ( int spi_data_index = 0; spi_data_index < 3; spi_data_index++ ) {
-      SPI.transfer(spi_data[spi_data_index]);
-  }
+    // Transmit SPI data
+    spi_data[0] = 0;   // Start register address (high bit clear == read)
+    spi_data[1] = 32; // Number of bytes to read
+    spi_data[2] = IMURegisters::getCRC(spi_data,2);
+    
+    digitalWrite(SS, LOW);
+    
+    for ( int spi_data_index = 0; spi_data_index < 3; spi_data_index++ ) {
+        SPI.transfer(spi_data[spi_data_index]);
+    }
+    
+    digitalWrite(SS, HIGH);
+    
+    delayMicroseconds(200); // Read 0xFFs until ready
+    digitalWrite(SS, LOW);
+    for ( int x = 0; x <= 32; x++ ) {
+        this->_spi_data[x] = SPI.transfer((byte)0xFF);
+    }
+    digitalWrite(SS, HIGH);  
+    spi_crc = IMURegisters::getCRC(this->_spi_data,32);
   
-  digitalWrite(SS, HIGH);
-  
-  delayMicroseconds(200); // Read 0xFFs until ready
-  digitalWrite(SS, LOW);
-  for ( int x = 0; x <= 32; x++ ) {
-      this->_spi_data[x] = SPI.transfer((byte)0xFF);
-  }
-  digitalWrite(SS, HIGH);  
-  spi_crc = IMURegisters::getCRC(this->_spi_data,32);
-
-  //SPI checksum
-  if ( spi_crc != this->_spi_data[32] ) {
-      Serial.print("SPI CRC ERROR!  ");
-      Serial.println(spi_crc);
+    //SPI checksum
+    if ( spi_crc != this->_spi_data[32] ) {
+        crc_count++;
+        Serial.print("SPI CRC ERROR!  ");
+        Serial.println(spi_crc);
+    }
+  }else{
+    finished();
   }
 }
 
@@ -302,8 +314,8 @@ void Robot::recalibrateMeasures(double x, double y, double theta, double phi, do
   Serial.print(" - ");
   Serial.print(theta);
   Serial.println("]");*/
-  this->_phi = phi;
-  this->_phi_offset = front_hall->getPhi() - phi;
+  //this->_phi = phi;
+  this->_phi_offset = 0.06;//front_hall->getPhi() - phi;
   this->_u = u;
 
   this->_prev_front_enc_ti = 0;//TODO
@@ -435,14 +447,15 @@ Robot *vehicle;
 //Splines
 #define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
 
-#define SEGMENTS 2 //start -> p1 -> p2
+#define SEGMENTS 2 //p1 -> p2 -> p3 defined to be (number of points - 1)
+#define POINTS 3
 
-//spline data format is x0 , x1, y0, y1, v_x0, v_x1, v_y0, v_y1
+//spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
 
-float spline_data[SEGMENTS*4] = {0.0, 0.0, 
-                                 0.5, 1.0,
-                                 0.0, 0.0,
-                                 0.5, 0.0};
+float spline_data[POINTS*4] = {0.0, 0.85, 0.0+0.04,
+                               0.0, 3.0, 6.0-0.41,
+                               0.0, 0.0, 0.0,
+                               0.0, 2.0, 0.0};
 
 //e.g.  d(4, 1) means d_y at the 4th segment
 
@@ -451,8 +464,9 @@ class Splines{
     Splines(void);
 
     void loadSplineData(float *spline_data);
-  
-    //this defines n-1 SEGMENTS [1,n-1]
+
+    //n is number of points
+    //this defines n-1 SEGMENTS (1,2,...,n-1)
     
     void printData(void);
 
@@ -480,33 +494,33 @@ class Splines{
     float *x_pos;
     float *y_pos;
 
-    int curr_segment;//goes from 1,2,3...n
+    int curr_segment;//goes from 1,2,3,...,n-1
     
 };
 
 Splines::Splines(void){
-  this->x_vels = new float[SEGMENTS];
-  this->y_vels = new float[SEGMENTS];
-  this->x_pos = new float[SEGMENTS];
-  this->y_pos = new float[SEGMENTS];
+  this->x_vels = new float[POINTS];
+  this->y_vels = new float[POINTS];
+  this->x_pos = new float[POINTS];
+  this->y_pos = new float[POINTS];
 
   this->curr_segment = 1;
 }
 
 void Splines::loadSplineData(float *spline_data){
   
-  for(int i = 0; i<SEGMENTS; i++){
+  for(int i = 0; i<POINTS; i++){
     this->x_pos[i] = spline_data[i];
-    this->y_pos[i] = spline_data[SEGMENTS + i];
+    this->y_pos[i] = spline_data[POINTS + i];
 
-    this->x_vels[i] = spline_data[SEGMENTS*2 + i];
-    this->y_vels[i] = spline_data[SEGMENTS*3 + i];
+    this->x_vels[i] = spline_data[POINTS*2 + i];
+    this->y_vels[i] = spline_data[POINTS*3 + i];
   }
 }
 
 void Splines::printData(void){
   Serial.println("x_vel[i] | y_vel[i] | x_pos[i] | y_pos[i]");
-  for(int i=0;i<SEGMENTS;i++){
+  for(int i=0;i<POINTS;i++){
     Serial.print(this->x_vels[i]);
     Serial.print(" | ");
     Serial.print(this->y_vels[i]);
@@ -609,7 +623,6 @@ Splines *spline;
 void setup() {
   Serial.begin(9600);
   //while(!Serial);
-  pinMode(LED_PIN, OUTPUT);
   delay(2000);
 
   //front_hall = new Hall();
@@ -654,11 +667,6 @@ void setup() {
   
   //navx operation normal, wait for human//TODO change this to wait for calibration finish
 
-  Serial.print("spline Ys");
-  Serial.print(spline->y(0, 1.0));
-  Serial.print(" ");
-  Serial.println(spline->y(1, 1.0));
-
   
   pinMode(SWITCH_PIN, INPUT); 
 
@@ -674,15 +682,15 @@ void setup() {
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
 }
 
-bool first_finished_flag = false;
-
 //using y as the internal parameter
 double startY = 0;
 
+double prevError=0;
+
 void loop(){
   
-  delay(50);
-  digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
+  delay(20);
+  
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
@@ -694,58 +702,57 @@ void loop(){
 
   //spline code goes here
 
-  int currSeg = spline->getCurrentSegment();
-  Serial.print("segment: ");
-  Serial.println(currSeg);
-  if(currSeg <= SEGMENTS){
+  if(digitalRead(SWITCH_PIN)){
+    finished();
+  }
 
-    motor->mSpeed(60);
+  int currSeg = spline->getCurrentSegment();
+  
+  if(currSeg <= SEGMENTS && !first_finished_flag){
+
+    motor->mSpeed(55);
   
     double x = vehicle->getX();
     double y = vehicle->getY();
+    double theta = vehicle->getTheta();
 
     double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
-    
-    Serial.print("y, splineY, startY: ");
-    
-    Serial.print(y);
-    Serial.print(" ");
-    
-    Serial.print(spline->y(currSeg, 1.0));//TODO: find out why this isn't changing...
-    Serial.print(" ");
-    
-    Serial.println(startY);
+    Serial.print("segment: ");
+    Serial.println(currSeg);
     
     Serial.print("segmentProgress: ");
     Serial.println(segmentProgress);
     double xDesired = spline->x(currSeg, segmentProgress);
-    Serial.print("splineX: ");
-    Serial.println(xDesired);
 
-
-
-    
     double errorX = x - xDesired;
+
+    double dError = (errorX - prevError)/0.021;//meters/sec
+
+    prevError = errorX;
   
-    double angleDesired = atan(-errorX / 0.05);// switch the axes , looking 0.05 m ahead y direction
-  
-    if(abs(angleDesired - vehicle->getPhi()) > PI/64){
-      //front_servo->angle(signum(angleDesired)*max(abs(angleDesired), STEERING_SWEEP/2-0.1));
-    }
+    double angleDesired = -5.0*errorX - 1.0*dError + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
+
+    //right positive
+
+    Serial.print("corrected theta: ");
+    Serial.println(theta - PI/2);
+    
+   
+    //double correctedAngle = signum(angleDesired)*max(abs(angleDesired), STEERING_SWEEP/2-0.1);
+    Serial.print("steer angle(deg): ");
+    Serial.println(angleDesired*180.0/PI);
+    front_servo->angle(angleDesired);
   
     //checking
-    if( spline->y(currSeg, 1.0) - y <= 0.05){
-      currSeg++;
+    if( spline->y(currSeg, 1.0) - y <= 0.01){//TODO:: Calibrate this measure...
+      spline->nextSegment();
       startY = y;
     }
   }else{//finished entire spline
-    if(!first_finished_flag){
-      motor->mSpeed(0);
-      motor->mBreak();
-      Serial.println("finished spline!");   
-      first_finished_flag = true;
-    }
+    finished();
   }
+
+  vehicle->logPose();
   
   
   //vehicle->logEncoders();
@@ -831,4 +838,13 @@ void interruptREnc(void){
 }
 void interruptLEnc(void){
   genericInterrupt(&l_enc, L_ENC_PIN_A, L_ENC_PIN_B);
+}
+
+void finished(void){
+  if(!first_finished_flag){
+    motor->mSpeed(0);
+    motor->mBreak();
+    Serial.println("finished spline!");   
+    first_finished_flag = true;
+  }  
 }
