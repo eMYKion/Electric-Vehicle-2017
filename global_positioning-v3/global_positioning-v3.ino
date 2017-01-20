@@ -288,8 +288,8 @@ void Robot::pollNavX(void){
     //SPI checksum
     if ( spi_crc != this->_spi_data[32] ) {
         crc_count++;
-        Serial.print("SPI CRC ERROR!  ");
-        Serial.println(spi_crc);
+        //Serial.print("SPI CRC ERROR!  ");
+        //Serial.println(spi_crc);
     }
   }else{
     finished();
@@ -589,14 +589,14 @@ float Splines::d(int seg, int axis){
 //this is what the user cares about
 float Splines::x(int seg, float t){//t must be between 0.0 and 1.0
   if((t < 0.0 ) || (t > 1.0)){
-    Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
+    //Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
   }
   return this->a(seg,0)*(t*t*t) + this->b(seg,0)*(t*t) + this->c(seg,0)*(t) + this->d(seg,0);
 }
 
 float Splines::y(int seg, float t){//t must be between 0.0 and 1.0
  if((t < 0.0 ) || (t > 1.0)){
-  Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
+  //Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
  }
  return this->a(seg,1)*(t*t*t) + this->b(seg,1)*(t*t) + this->c(seg,1)*(t) + this->d(seg,1);
 }
@@ -628,7 +628,7 @@ int signum(float x){
 Splines *spline;
 
 void setup() {
-  Serial.begin(9600);
+  //Serial.begin(9600);
   //while(!Serial);
   delay(2000);
 
@@ -645,7 +645,7 @@ void setup() {
   
 
   //Wait for NavX to Calibrate
-  Serial.println("Waiting for NavX...");
+  //Serial.println("Waiting for NavX...");
   
   
   vehicle->pollNavX();
@@ -654,23 +654,23 @@ void setup() {
     vehicle->pollNavX();
     switch(vehicle->getNavXStatus()){
       case(NAVX_OP_STATUS_INITIALIZING):
-        Serial.println("NAVX_OP_STATUS_INITIALIZING");
+        //Serial.println("NAVX_OP_STATUS_INITIALIZING");
         break;
       case(NAVX_OP_STATUS_SELFTEST_IN_PROGRESS):
-        Serial.println("NAVX_OP_STATUS_SELFTEST_IN_PROGRESS");
+        //Serial.println("NAVX_OP_STATUS_SELFTEST_IN_PROGRESS");
         break;
       case(NAVX_OP_STATUS_ERROR):
-        Serial.println("NAVX_OP_STATUS_ERROR");
+        //Serial.println("NAVX_OP_STATUS_ERROR");
         break;
       case(NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS):
-        Serial.println("NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS");
+        //Serial.println("NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS");
         break;
       default:
-        Serial.println("NavX Unknown Status...");
+        //Serial.println("NavX Unknown Status...");
         break;
     };
   }  
-  Serial.println("NAVX_OP_STATUS_NORMAL");
+  //Serial.println("NAVX_OP_STATUS_NORMAL");
   
   //navx operation normal, wait for human//TODO change this to wait for calibration finish
 
@@ -680,11 +680,11 @@ void setup() {
 
   
   while(!digitalRead(SWITCH_PIN)){
-    Serial.println("Waiting for User Button...");
+    //Serial.println("Waiting for User Button...");
     delay(100);
   }
   delay(1000);
-  Serial.println("Started");
+  //Serial.println("Started");
   
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
 }
@@ -706,7 +706,7 @@ void loop(){
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  vehicle->logPose();
+  //vehicle->logPose();
 
   checkEncoderZeroVelocities(&front_enc, 4);
   checkEncoderZeroVelocities(&r_enc, 4);
@@ -855,7 +855,7 @@ void finished(void){
   if(!first_finished_flag){
     motor->mSpeed(0);
     motor->mBreak();
-    Serial.println("finished spline!");   
+    //Serial.println("finished spline!");   
     first_finished_flag = true;
   }  
 }
