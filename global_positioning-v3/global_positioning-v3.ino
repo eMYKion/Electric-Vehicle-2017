@@ -83,6 +83,8 @@ servo *front_servo;
 #define WHEEL_BACK_CIRCUMFERENCE  PI*WHEEL_BACK_DIAMETER //meters
 #define METERS_PER_TICK_BACK 0.001152//WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
 
+#define ROBOT_LENGTH 0.262
+
 //hall sensor
 #include <ADC.h>
 #define HALL_PIN A10
@@ -305,8 +307,8 @@ int Robot::getNavXOpStatus(void){
 }
 
 void Robot::recalibrateMeasures(double x, double y, double theta, double phi, double u, int long l_enc_ticks, int long r_enc_ticks){
-  this->_x = x;
-  this->_y = y;
+  this->_x = x - ROBOT_LENGTH * cos(theta);
+  this->_y = y - ROBOT_LENGTH * sin(theta);
   this->_theta = theta;
   this->_theta_offset = this->getTheta() - theta;
   /*Serial.print("RESET [offset = ");
@@ -406,14 +408,14 @@ void Robot::updatePose(void){
   double dy = du*sin(this->_theta);
 
   this->_x += dx;
-  this->_y += dy;
+  this->_y += dy; 
 }
 
 void Robot::logPose(void){
   Serial.print("pose( x = ");
-  Serial.print(this->getX());
+  Serial.print(this->getX() + ROBOT_LENGTH * cos(this->getTheta()));
   Serial.print(", y = ");
-  Serial.print(this->getY());
+  Serial.print(this->getY() + ROBOT_LENGTH * sin(this->getTheta()));
   Serial.print(", theta = ");
   Serial.print(this->getTheta());
   Serial.print(", phi = ");
@@ -463,6 +465,11 @@ float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
                                0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
                                0.0, 0.0, 0.0,
                                0.0, 2.0, 0.0};
+
+/*float spline_data[POINTS*4] = {0.0, 0.0, 0.0,
+                               0.0, 5.0, 10.0,
+                               0.0, 0.0, 0.0,
+                               0.0, 2.0, 0.0};*/
 
 //e.g.  d(4, 1) means d_y at the 4th segment
 
@@ -628,15 +635,17 @@ int signum(float x){
 Splines *spline;
 
 void setup() {
-  //Serial.begin(9600);
-  //while(!Serial);
-  delay(2000);
+  Serial.begin(9600);
+  
+  delay(10000);
 
   //front_hall = new Hall();
   //motor = new Motor();
   //front_servo = new servo();
   
   vehicle = new Robot();
+
+  front_servo->angle(0);
 
   spline = new Splines();
   spline->loadSplineData(spline_data);
@@ -684,7 +693,7 @@ void setup() {
     delay(100);
   }
   delay(1000);
-  //Serial.println("Started");
+  Serial.println("Started");
   
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
 }
@@ -699,14 +708,23 @@ const float K_d = 1;
 
 int motorSpeed = 55;
 
+elapsedMicros loopTime;
+
+#define LOOPS_PER_SEC 50
+#define PRINTS_PER_SEC 1
+
+int loopCount = 0;
+
+
 void loop(){
-  
-  delay(20);
+
+  loopTime = 0;
+  loopCount++;
   
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  //vehicle->logPose();
+  vehicle->logPose();
 
   checkEncoderZeroVelocities(&front_enc, 4);
   checkEncoderZeroVelocities(&r_enc, 4);
@@ -722,9 +740,10 @@ void loop(){
   
   if(currSeg <= SEGMENTS && !first_finished_flag){
   
-    double x = vehicle->getX();
-    double y = vehicle->getY();
     double theta = vehicle->getTheta();
+    
+    double x = vehicle->getX() + ROBOT_LENGTH * cos(theta);
+    double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
 
     if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < 0.35){//if on last segment and almost reached goal
       motor->mBreak();
@@ -766,10 +785,16 @@ void loop(){
     }
   }else{//finished entire spline
     finished();
+    if(loopCount >= LOOPS_PER_SEC/PRINTS_PER_SEC){
+      vehicle->logPose();
+      loopCount = 0;
+    }
   }
   //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
+
+  while(loopTime < 1e6/LOOPS_PER_SEC);
   
 }
 

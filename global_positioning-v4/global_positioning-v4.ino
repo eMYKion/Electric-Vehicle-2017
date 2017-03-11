@@ -20,7 +20,7 @@ Motor::Motor(void){
 }
 
 void Motor::setVelocity(int PWM){
-  if(PWM != 0){//if non zero speed
+  if(PWM >= 0){//if non zero speed
     digitalWriteFast(RELAY_PIN, 0);
     delay(5);
     analogWrite(MOTOR_PIN, PWM);  
@@ -59,7 +59,7 @@ servo::servo(void){
   this->servoobj->attach(SERVO_PIN, 1000, 2000); // some motors need min/max setting
 }
 
-#define SERVO_OFFSET 21
+#define SERVO_OFFSET 17
 
 void servo::angle(float ang){
   this->servoobj->write((int)(PWM_ANGLE_TO_MEASURE(ang) - SERVO_OFFSET));
@@ -472,9 +472,9 @@ float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
 */
 
 float spline_data[POINTS*4] = {0.0, 0.0, 0.0,
-                               0.0, 1.0, 2.0,
+                               0.0, 5.0, 10.0,
                                0.0, 0.0, 0.0,
-                               0.0, 4.0, 0.0};
+                               0.0, 3.0, 0.0};
 
 //e.g.  d(4, 1) means d_y at the 4th segment
 
@@ -719,9 +719,10 @@ void Splines::updateSpline(double x, double y, double vx, double vy){
   
   //if close to next waypoint, then remove the waypoint to continue to next waypoint
   
-  double err = sqrt(error_x * error_x + error_y * error_y);
+  //double err = sqrt(error_x * error_x + error_y * error_y);
   
-  if(err < 0.1){//distance tolerance in meters
+  //TODO
+  if(error_y <= 0){//distance tolerance in meters
     
     this->removePose(1);
     
@@ -768,7 +769,7 @@ Splines *spline;
 void setup() {
   //Serial.begin(9600);
   //while(!Serial);
-  delay(2000);
+  delay(10000);
 
   //front_hall = new Hall();
   //motor = new Motor();
@@ -777,6 +778,8 @@ void setup() {
   front_hall = new Hall();
   motor = new Motor();
   front_servo = new servo();
+
+  front_servo->angle(0);
   
   vehicle = new Robot();
 
@@ -837,16 +840,24 @@ double prevError=0;
 const float K_p = 3;
 const float K_d = 1;
 
-int motorSpeed = 55;//pwm
-double motorMaxSpeed = 4.0;//meters/sec
+double motorMaxSpeed = 1.5;//meters/sec
+
+elapsedMicros loopTime;
+
+#define LOOPS_PER_SECOND 50
+
+int loopCount = 0;
+#define PRINTS_PER_SECOND 2
 
 void loop(){
-  delay(100);
+  loopTime = 0;
+  loopCount++;
 
   if(!(spline->isDone())){
   
     vehicle->updatePose();
     vehicle->logPose();
+    Serial.println(front_hall->getAdc());
     checkEncoderZeroVelocities(&front_enc, 4);
     checkEncoderZeroVelocities(&r_enc, 4);
     checkEncoderZeroVelocities(&l_enc, 4);
@@ -855,14 +866,15 @@ void loop(){
     float seekU = 0.01;
 
     //velocity
-    double vel =  40*sqrt( pow(spline->vx(1, seekU), 2) + pow(spline->vy(1, seekU), 2) );
+    double vel =  10*sqrt( pow(spline->vx(1, seekU), 2) + pow(spline->vy(1, seekU), 2) );
+    
     if(vel > motorMaxSpeed){
       vel = motorMaxSpeed;
     }
     int velCorr = (int)(255*vel/motorMaxSpeed);
-    Serial.print("velCorr: ");
-    Serial.println(velCorr);
-    motor->setVelocity(velCorr);
+    
+    
+    motor->setVelocity(55);//TODO
   
     //steering (works)
     double angleDesired = atan2(spline->y(1, seekU), spline->x(1, seekU));
@@ -871,7 +883,11 @@ void loop(){
 
   }else{
     front_servo->angle(0);
-    motor->setVelocity(0);
+    motor->setVelocity(-1);
+    if (loopCount > LOOPS_PER_SECOND/PRINTS_PER_SECOND){
+      vehicle->logPose();
+      loopCount = 0;
+    }
   }
 
   //double angleDesired = -(K_p*errorX + K_d*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
@@ -905,6 +921,8 @@ void loop(){
     finished();
   }
   */
+
+  while(loopTime < 1e6/LOOPS_PER_SECOND);
 }
 
 void checkEncoderZeroVelocities(struct encoder *enc, int tickTolerance){
@@ -987,9 +1005,9 @@ void interruptLEnc(void){
 
 void finished(void){
   if(!first_finished_flag){
-    motor->setVelocity(0);
+    motor->setVelocity(-1);
     
-    //Serial.println("finished spline!");   
+    Serial.println("finished spline!");   
     first_finished_flag = true;
   }  
 }
