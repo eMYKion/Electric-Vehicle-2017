@@ -1,7 +1,12 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
+#define TARGET_DISTANCE 9.5
+#define CAN_DISTANCE 0.2
+#define BIAS 0.01
+
 //system
 #define SWITCH_PIN 22
+#define LED_PIN 14
 
 //motor
 #define RELAY_PIN 2
@@ -23,12 +28,13 @@ Motor::Motor(void){
 void Motor::mBreak(void){
   analogWrite(MOTOR_PIN, 0);
   digitalWriteFast(RELAY_PIN, 1);
-  delay(5);
 }
 
 void Motor::mSpeed(int PWM){
-  digitalWriteFast(RELAY_PIN, 0);
-  delay(5);
+  if (digitalReadFast(RELAY_PIN)){
+    digitalWriteFast(RELAY_PIN, 0);
+    delay(5);
+  }
   analogWrite(MOTOR_PIN, PWM);
 }
 
@@ -457,9 +463,6 @@ Robot *vehicle;
 
 //spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
 
-#define TARGET_DISTANCE 10.0
-#define CAN_DISTANCE 0.3
-#define BIAS 0.05
 
 float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
                                0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
@@ -635,9 +638,10 @@ int signum(float x){
 Splines *spline;
 
 void setup() {
-  Serial.begin(9600);
+  //Serial.begin(9600);
+  pinMode(LED_PIN, OUTPUT);
   
-  delay(10000);
+  delay(20000);
 
   //front_hall = new Hall();
   //motor = new Motor();
@@ -659,7 +663,7 @@ void setup() {
   
   vehicle->pollNavX();
   while(vehicle->getNavXOpStatus()!=NAVX_OP_STATUS_NORMAL){
-    delay(100);
+    delay(300);
     vehicle->pollNavX();
     switch(vehicle->getNavXStatus()){
       case(NAVX_OP_STATUS_INITIALIZING):
@@ -689,11 +693,15 @@ void setup() {
 
   
   while(!digitalRead(SWITCH_PIN)){
-    //Serial.println("Waiting for User Button...");
-    delay(100);
+    //Serial.print("Waiting for User Button...");
+    vehicle->pollNavX();
+    //Serial.print("Angle: ");
+    //Serial.println(vehicle->getTheta()*180.0/PI);
+    digitalWriteFast(LED_PIN, digitalReadFast(LED_PIN));
+    delay(50);
   }
   delay(1000);
-  Serial.println("Started");
+  //Serial.println("Started");
   
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
 }
@@ -703,18 +711,23 @@ double startY = 0;
 
 double prevError=0;
 
-const float K_p = 3;
-const float K_d = 1;
+#define  K_p  2.0
+#define K_d 1.0
 
 int motorSpeed = 55;
 
 elapsedMicros loopTime;
 
 #define LOOPS_PER_SEC 50
-#define PRINTS_PER_SEC 1
+#define PRINTS_PER_SEC 5
 
 int loopCount = 0;
 
+#define LAST_COASTING_DISTANCE 0.05
+#define END_TARGET_VELOCITY 0.5
+#define K_P_VEL 120
+#define CONST_SPEED 40
+#define VELOCITY_FILTER 0.2
 
 void loop(){
 
@@ -724,7 +737,6 @@ void loop(){
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  vehicle->logPose();
 
   checkEncoderZeroVelocities(&front_enc, 4);
   checkEncoderZeroVelocities(&r_enc, 4);
@@ -745,11 +757,18 @@ void loop(){
     double x = vehicle->getX() + ROBOT_LENGTH * cos(theta);
     double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
 
-    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < 0.35){//if on last segment and almost reached goal
+    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < LAST_COASTING_DISTANCE){//if on last segment and almost reached goal
+      motor->mBreak();
+
+    }else if(y > 8.8){
+      motorSpeed = (int) (VELOCITY_FILTER*max(K_P_VEL*(END_TARGET_VELOCITY - vehicle->getRobotVel()) + CONST_SPEED, 0) + (1-VELOCITY_FILTER)*motorSpeed);
+      motor->mSpeed(motorSpeed); 
+    }else if(y > 8.5){
       motor->mBreak();
     }else{
-      motor->mSpeed(55);
+      motor->mSpeed(motorSpeed);
     }
+
 
     double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
     //Serial.print("segment: ");
@@ -761,7 +780,7 @@ void loop(){
 
     double errorX = x - xDesired;
 
-    double dError = (errorX - prevError)/0.021;//meters/sec
+    double dError = (errorX - prevError)*LOOPS_PER_SEC;//meters/sec
 
     prevError = errorX;
   
@@ -785,14 +804,17 @@ void loop(){
     }
   }else{//finished entire spline
     finished();
-    if(loopCount >= LOOPS_PER_SEC/PRINTS_PER_SEC){
-      vehicle->logPose();
-      loopCount = 0;
-    }
+
   }
   //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
+
+  if (loopCount >= LOOPS_PER_SEC/PRINTS_PER_SEC) {
+    digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
+    //vehicle->logPose();
+    loopCount = 0;
+  }
 
   while(loopTime < 1e6/LOOPS_PER_SEC);
   
@@ -878,9 +900,8 @@ void interruptLEnc(void){
 
 void finished(void){
   if(!first_finished_flag){
-    motor->mSpeed(0);
     motor->mBreak();
-    //Serial.println("finished spline!");   
+    //Serial.println("finished");   
     first_finished_flag = true;
   }  
 }
