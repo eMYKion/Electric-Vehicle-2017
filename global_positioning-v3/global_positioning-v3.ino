@@ -1,8 +1,8 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
-#define TARGET_DISTANCE 9.5
-#define CAN_DISTANCE 0.2
-#define BIAS 0.01
+#define TARGET_DISTANCE 10.32
+#define CAN_DISTANCE 0.3
+#define BIAS 0.05
 
 //system
 #define SWITCH_PIN 22
