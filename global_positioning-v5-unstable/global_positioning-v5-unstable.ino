@@ -1,16 +1,40 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
-#define TARGET_DISTANCE 10.32
-#define CAN_DISTANCE 0.3
-#define BIAS 0.05
+#define TARGET_DISTANCE 9.5
+#define CAN_DISTANCE 0.2
+#define BIAS 0.01
 
-//system
+//system pins
 #define SWITCH_PIN 22
 #define LED_PIN 14
 
 //motor
 #define RELAY_PIN 2
 #define MOTOR_PIN 3
+
+//loop timing
+elapsedMicros loopTime;
+#define LOOPS_PER_SEC 200
+#define SLOWER_LOOPS_PER_SEC 5
+int loopCount = 0;
+
+//velocity control
+#define END_TARGET_MAX_VELOCITY 0.8  //meters/sec
+#define END_TARGET_MIN_VELOCITY 0.3 //meters/sec
+#define TARGET_SLOW_DOWN_DISTANCE 0.5 //meters, the distance where vehicle slows down from END_TARGET_MAX_VELOCITY to END_TARGET_MIN_VELOCITY
+#define VELOCITY_TOLERANCE 0.2  //meters/sec
+#define K_P_VEL 200
+#define CONST_SPEED 40
+#define VELOCITY_FILTER 0.1
+
+//for recalibrating the measures
+#define NO_RECALIBRATION -42
+
+//Splines
+#define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
+
+#define SEGMENTS 2 //p1 -> p2 -> p3 defined to be (number of points - 1)
+#define POINTS 3
 
 class Motor{
   public:
@@ -33,7 +57,7 @@ void Motor::mBreak(void){
 void Motor::mSpeed(int PWM){
   if (digitalReadFast(RELAY_PIN)){
     digitalWriteFast(RELAY_PIN, 0);
-    delay(5);
+    delay(3);
   }
   analogWrite(MOTOR_PIN, PWM);
 }
@@ -61,7 +85,7 @@ class servo{
 
 servo::servo(void){
   this->servoobj = new Servo();
-  this->servoobj->attach(SERVO_PIN);  // attaches the servo on pin 9 to the servo object
+  this->servoobj->attach(SERVO_PIN);  // attaches the servo to the servo object
   this->servoobj->attach(SERVO_PIN, 1000, 2000); // some motors need min/max setting
 }
 
@@ -78,16 +102,18 @@ servo *front_servo;
 #define BACKWHEEL_TO_FRONT_DOWEL 0.265 //meters
 
 #define ROBOT_WHEELBASE 0.2 //meters
+#define ROBOT_LENGTH 0.262
+
 
 #define ENCODER_FRONT_RESOLUTION 1440 //ticks
 #define WHEEL_FRONT_DIAMETER 0.08 //meters
 #define WHEEL_FRONT_CIRCUMFERENCE  PI*WHEEL_FRONT_DIAMETER //meters
 #define METERS_PER_TICK_FRONT WHEEL_FRONT_CIRCUMFERENCE / ENCODER_FRONT_RESOLUTION //meters/tick
 
-#define ENCODER_BACK_RESOLUTION 250 //ticks
+#define ENCODER_BACK_RESOLUTION 240 //ticks
 #define WHEEL_BACK_DIAMETER 0.09 //meters
 #define WHEEL_BACK_CIRCUMFERENCE  PI*WHEEL_BACK_DIAMETER //meters
-#define METERS_PER_TICK_BACK 0.001152//WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
+#define METERS_PER_TICK_BACK 0.001152  //WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
 
 #define ROBOT_LENGTH 0.262
 
@@ -175,6 +201,9 @@ struct encoder l_enc;
 #define SENSOR_WEIGHT_BACK_ENCODER_L 0.50
 #define SENSOR_WEIGHT_BACK_ENCODER_R 0.50
 #define SENSOR_WEIGHT_FRONT_ENCODER 0.00
+#define ROBOT_VELOCITY_FILTER 0.08
+#define ROBOT_X_VELOCITY_FILTER 0.08
+#define ROBOT_Y_VELOCITY_FILTER 0.08
 
 #include <SPI.h>
 #include "IMURegisters.h"
@@ -190,18 +219,30 @@ class Robot{
     void pollNavX(void);
     int getNavXOpStatus(void);
     int getNavXStatus(void);
+    void makeUpdateRate200Hz(void);
     double getU(void);
     double getX(void);
     double getY(void);
     double getTheta(void);//angle to floor
     double getPhi(void);//steering angle
+    
+    double getTargetVelocity(double y_position);
+    double getEstimatedCoastingDistance(double robot_velocity);
+    
     long int getFrontEnc(void);//ticks
     long int getREnc(void);//ticks
     long int getLEnc(void);//ticks
+    
     double getFrontEncVel(void);//ticks/sec
     double getREncVel(void);//ticks/sec
     double getLEncVel(void);//ticks/sec
     double getRobotVel(void);//meters/sec
+    void filterRobotVel(void);
+    double getFilteredRobotVel(void);
+    double filtered_robot_vel;  //meters/sec
+    double filtered_robot_x_vel; //meters/sec
+    double filtered_robot_y_vel;  //meters/sec
+    
     
     void recalibrateMeasures(double x, double y, double theta, double phi, double u, int long l_enc_ticks, int long r_enc_ticks);
     void updatePose(void);
@@ -258,51 +299,48 @@ Robot::Robot(void){
 
 void Robot::setupNavX(void){
   pinMode(CS_PIN,OUTPUT);
-  digitalWrite(SS, HIGH);
+  digitalWriteFast(SS, HIGH);
   SPI.begin();
   SPI.setBitOrder(MSBFIRST);
   SPI.setDataMode(SPI_MODE3);
-  SPI.setClockDivider(16); /* 16Mhz/32 = 500kHz; /16=1Mhz; /8=2Mhz */ 
+  SPI.setClockDivider(8); /* 16Mhz/32 = 500kHz; /16=1Mhz; /8=2Mhz */ 
 }
 
 void Robot::pollNavX(void){
-  int crc_count = 0;
-  
-  if(crc_count <= 3){
-    uint8_t spi_crc;
-    uint8_t spi_data[3];
-  
-    // Transmit SPI data
+  uint8_t spi_crc;
+  uint8_t spi_data[3];
+
+  // Transmit SPI data
+  do{
     spi_data[0] = 0;   // Start register address (high bit clear == read)
     spi_data[1] = 32; // Number of bytes to read
     spi_data[2] = IMURegisters::getCRC(spi_data,2);
     
-    digitalWrite(SS, LOW);
+    digitalWriteFast(SS, LOW);
     
     for ( int spi_data_index = 0; spi_data_index < 3; spi_data_index++ ) {
         SPI.transfer(spi_data[spi_data_index]);
     }
     
-    digitalWrite(SS, HIGH);
+    digitalWriteFast(SS, HIGH);
     
     delayMicroseconds(200); // Read 0xFFs until ready
-    digitalWrite(SS, LOW);
+    digitalWriteFast(SS, LOW);
     for ( int x = 0; x <= 32; x++ ) {
         this->_spi_data[x] = SPI.transfer((byte)0xFF);
     }
-    digitalWrite(SS, HIGH);  
+    digitalWriteFast(SS, HIGH);  
     spi_crc = IMURegisters::getCRC(this->_spi_data,32);
-  
+
     //SPI checksum
-    if ( spi_crc != this->_spi_data[32] ) {
-        crc_count++;
-        //Serial.print("SPI CRC ERROR!  ");
-        //Serial.println(spi_crc);
+    if (spi_crc != this->_spi_data[32]){
+      Serial.print("SPI CRC ERROR!  ");
+      Serial.println(spi_crc);
     }
-  }else{
-    finished();
-  }
+  }while(spi_crc != this->_spi_data[32]);
+
 }
+
 
 int Robot::getNavXStatus(void){
   return this->_spi_data[NAVX_REG_CAL_STATUS];
@@ -312,11 +350,28 @@ int Robot::getNavXOpStatus(void){
   return this->_spi_data[NAVX_REG_OP_STATUS];
 }
 
+void Robot::makeUpdateRate200Hz(void){
+    uint8_t spi_data[3];
+    
+  /* Transmit SPI data */
+  spi_data[0] = 0x80 | NAVX_REG_UPDATE_RATE_HZ; // Starting Register Address + Write Request
+  spi_data[1] = 200;
+  spi_data[2] = IMURegisters::getCRC(spi_data,2);
+  digitalWriteFast(SS, LOW);
+  for ( int i = 0; i < 3; i++ ) {
+      SPI.transfer(spi_data[i]);
+  }
+  digitalWriteFast(SS, HIGH);
+}
+
 void Robot::recalibrateMeasures(double x, double y, double theta, double phi, double u, int long l_enc_ticks, int long r_enc_ticks){
-  this->_x = x - ROBOT_LENGTH * cos(theta);
-  this->_y = y - ROBOT_LENGTH * sin(theta);
-  this->_theta = theta;
-  this->_theta_offset = this->getTheta() - theta;
+  
+  if(theta != NO_RECALIBRATION){
+    this->_theta = theta;
+    this->_theta_offset = this->getTheta() - theta;
+  } 
+  this->_x = x - ROBOT_LENGTH * cos(this->getTheta());
+  this->_y = y - ROBOT_LENGTH * sin(this->getTheta());
   /*Serial.print("RESET [offset = ");
   Serial.print(this->getTheta());
   Serial.print(" - ");
@@ -351,6 +406,7 @@ double Robot::getTheta(void){
   Serial.print(" - ");
   Serial.print(this->_theta_offset);
   Serial.println("]");*/
+
   free(angle);
   return this->_theta - this->_theta_offset;
 }
@@ -358,6 +414,19 @@ double Robot::getTheta(void){
 double Robot::getPhi(void){
   this->_phi = front_hall->getPhi();
   return this->_phi - this->_phi_offset;
+}
+
+double Robot::getTargetVelocity(double y_position){
+  if (TARGET_DISTANCE - y_position < TARGET_SLOW_DOWN_DISTANCE){ //when getting close to the target, slow down
+    return END_TARGET_MIN_VELOCITY;
+  }else{
+    return END_TARGET_MAX_VELOCITY;
+    return END_TARGET_MAX_VELOCITY;
+  }
+}
+
+double Robot::getEstimatedCoastingDistance(double robot_velocity){
+  return 0.1*robot_velocity; //very crude, but will probably work
 }
 
 long int Robot::getFrontEnc(void){//ticks
@@ -387,8 +456,17 @@ double Robot::getRobotVel(void){//meters/sec
   return SENSOR_WEIGHT_BACK_ENCODER_L*this->_l_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_BACK_ENCODER_R*this->_r_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_FRONT_ENCODER*this->_front_enc->vel*METERS_PER_TICK_FRONT; 
 }
 
+void Robot::filterRobotVel(void){
+  this->filtered_robot_vel += ROBOT_VELOCITY_FILTER*(SENSOR_WEIGHT_BACK_ENCODER_L*this->_l_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_BACK_ENCODER_R*this->_r_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_FRONT_ENCODER*this->_front_enc->vel*METERS_PER_TICK_FRONT - this->filtered_robot_vel);
+}
+
+double Robot::getFilteredRobotVel(void){
+  return this->filtered_robot_vel;
+}
+
 void Robot::updatePose(void){
   //this->_phi = front_hall->getPhi();
+
   int dFenc = (int)(this->_front_enc->ticks - this->_prev_front_enc_ti);
   int dLenc = (int)(this->_l_enc->ticks - this->_prev_l_enc_ti);
   int dRenc = (int)(this->_r_enc->ticks - this->_prev_r_enc_ti); 
@@ -399,6 +477,7 @@ void Robot::updatePose(void){
   //TODO: write slipping analysis and navigation correction
   double du = SENSOR_WEIGHT_BACK_ENCODER_L*dLenc * METERS_PER_TICK_BACK +SENSOR_WEIGHT_BACK_ENCODER_R*dRenc * METERS_PER_TICK_BACK + SENSOR_WEIGHT_FRONT_ENCODER*dFenc*METERS_PER_TICK_FRONT;
   this->_u += du;
+
   this->pollNavX();
   
   // -PI to +PI
@@ -407,6 +486,9 @@ void Robot::updatePose(void){
   
   double dx = du*cos(this->_theta);
   double dy = du*sin(this->_theta);
+  
+  this->filtered_robot_x_vel += ROBOT_X_VELOCITY_FILTER * (dx * LOOPS_PER_SEC - this->filtered_robot_x_vel);
+  this->filtered_robot_y_vel += ROBOT_Y_VELOCITY_FILTER * (dy * LOOPS_PER_SEC - this->filtered_robot_y_vel);
 
   this->_x += dx;
   this->_y += dy; 
@@ -447,29 +529,6 @@ void Robot::logEncoderVelocities(void){
 Robot *vehicle;
 
 
-//Splines
-#define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
-
-
-
-
-#define SEGMENTS 2 //p1 -> p2 -> p3 defined to be (number of points - 1)
-#define POINTS 3
-
-//spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
-
-
-float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
-                               0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
-                               0.0, 0.0, 0.0,
-                               0.0, 2.0, 0.0};
-
-/*float spline_data[POINTS*4] = {0.0, 0.0, 0.0,
-                               0.0, 5.0, 10.0,
-                               0.0, 0.0, 0.0,
-                               0.0, 2.0, 0.0};*/
-
-//e.g.  d(4, 1) means d_y at the 4th segment
 
 class Splines{
   public:
@@ -636,24 +695,44 @@ void setup() {
   Serial.begin(9600);
   pinMode(LED_PIN, OUTPUT);
   
-  delay(10000);  //This needs to be changed back after testing
+  delay(10000);
 
   //front_hall = new Hall();
   //motor = new Motor();
   //front_servo = new servo();
   
   vehicle = new Robot();
-
+  vehicle->makeUpdateRate200Hz();
+  
+  //test if it's really 200 Hz
+  vehicle->pollNavX();
+  float starting_theta = vehicle->getTheta();
+/*
+  //wait, polling at 200 Hz, until theta changes, to ensure we start at the beginning of a NavX cycle
+  do{
+    loopTime = 0;
+    vehicle->pollNavX();
+    while(loopTime < 1e6/200);
+  }while(vehicle->getTheta() == starting_theta);
+  
+  delayMicroseconds(1e6/200 * 3); //wait out the rest of that cycle
+  
+  //prints out values at 200 hz so we can see if the update rate is right
+  for(int loopCounter = 0; loopCounter < 50; loopCounter++){
+    for(int loopCounter2 = 0; loopCounter2 < 4; loopCounter2++){
+      loopTime = 0;
+      vehicle->pollNavX();
+      Serial.print(vehicle->getTheta()/PI*180);
+      Serial.print(" ");
+      while(loopTime < 1e6/200);
+    }
+    Serial.println(" ");
+  }
+  */
   front_servo->angle(0);
 
-  spline = new Splines();
-  spline->loadSplineData(spline_data);
-
-  
-  
-
   //Wait for NavX to Calibrate
-  //Serial.println("Waiting for NavX...");
+  Serial.println("Waiting for NavX...");
   
   
   vehicle->pollNavX();
@@ -662,23 +741,23 @@ void setup() {
     vehicle->pollNavX();
     switch(vehicle->getNavXStatus()){
       case(NAVX_OP_STATUS_INITIALIZING):
-        //Serial.println("NAVX_OP_STATUS_INITIALIZING");
+        Serial.println("NAVX_OP_STATUS_INITIALIZING");
         break;
       case(NAVX_OP_STATUS_SELFTEST_IN_PROGRESS):
-        //Serial.println("NAVX_OP_STATUS_SELFTEST_IN_PROGRESS");
+        Serial.println("NAVX_OP_STATUS_SELFTEST_IN_PROGRESS");
         break;
       case(NAVX_OP_STATUS_ERROR):
-        //Serial.println("NAVX_OP_STATUS_ERROR");
+        Serial.println("NAVX_OP_STATUS_ERROR");
         break;
       case(NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS):
-        //Serial.println("NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS");
+        Serial.println("NAVX_OP_STATUS_IMU_AUTOCAL_IN_PROGRESS");
         break;
       default:
-        //Serial.println("NavX Unknown Status...");
+        Serial.println("NavX Unknown Status...");
         break;
     };
   }  
-  //Serial.println("NAVX_OP_STATUS_NORMAL");
+  Serial.println("NAVX_OP_STATUS_NORMAL");
   
   //navx operation normal, wait for human//TODO change this to wait for calibration finish
 
@@ -686,43 +765,64 @@ void setup() {
   pinMode(SWITCH_PIN, INPUT); 
 
 
-  
-  while(!digitalRead(SWITCH_PIN)){
-    //Serial.print("Waiting for User Button...");
+  //wait for button to be pressed
+  while(!digitalReadFast(SWITCH_PIN)){
+    Serial.print("Waiting for User Button...");
     vehicle->pollNavX();
-    //Serial.print("Angle: ");
-    //Serial.println(vehicle->getTheta()*180.0/PI);
-    digitalWriteFast(LED_PIN, digitalReadFast(LED_PIN));
-    delay(50);
+    Serial.print("Angle: ");
+    Serial.println(vehicle->getTheta()*180.0/PI);
+    delay(100);
   }
-  delay(1000);
-  //Serial.println("Started");
+  //wait for button to be released
+  while(digitalReadFast(SWITCH_PIN)){delay(50);} 
+  delay(500);
   
+  digitalWriteFast(LED_PIN, HIGH);
+  vehicle->pollNavX();
   vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
+  
+  while(!digitalReadFast(SWITCH_PIN)){delay(50);} //wait for button to be pressed to signal run start
+  delay(500);
+  vehicle->pollNavX();
+  vehicle->recalibrateMeasures(0, 0, NO_RECALIBRATION, 0, 0, 0, 0);
+  Serial.print("Starting angle (degrees): ");
+  Serial.println(vehicle->getTheta()*180.0/PI);
+  
+  //spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
+  /* format:
+  float spline_data[POINTS*4] = {x_point0, x_point1, ...
+                                 y_point0, y_point1, ...
+                                 velocity_x_point0, ...
+                                 velocity_y_point0, ...};*/
+
+
+  float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
+                                 0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
+                                 0.01*sin(vehicle->getTheta()), 0.0, -0.01*sin(vehicle->getTheta()),
+                                 0.01*cos(vehicle->getTheta()), 2.0, 0.01*cos(vehicle->getTheta())};
+  //e.g.  d(4, 1) means d_y at the 4th segment
+  //use of small velocities at beginning and end is to get the spline pointing in the right direction
+  
+  spline = new Splines();
+  spline->loadSplineData(spline_data);
+  
 }
 
 //using y as the internal parameter
 double startY = 0;
 
 double prevError=0;
+double dError = 0;
 
-#define  K_p  2.0
-#define K_d 1.0
+//for spline follower
+#define  K_P_SPLINE_FOLLOW  2.0
+#define K_D_SPLINE_FOLLOW 1.0
+#define dERROR_FILTER 0.2
 
-int motorSpeed = 55;
+#define MAX_MOTOR_ACCEL 60
+int motorSpeed = MAX_MOTOR_ACCEL;
 
-elapsedMicros loopTime;
 
-#define LOOPS_PER_SEC 50
-#define PRINTS_PER_SEC 5
-
-int loopCount = 0;
-
-#define LAST_COASTING_DISTANCE 0.05
-#define END_TARGET_VELOCITY 0.5
-#define K_P_VEL 120
-#define CONST_SPEED 40
-#define VELOCITY_FILTER 0.2
 
 void loop(){
 
@@ -730,39 +830,41 @@ void loop(){
   loopCount++;
   
   //very occaisionally get CRC errors
+
   vehicle->updatePose();
-  checkEncoderZeroVelocities(&front_enc, 4);
-  checkEncoderZeroVelocities(&r_enc, 4);
-  checkEncoderZeroVelocities(&l_enc, 4);
+  vehicle->filterRobotVel();
 
-  //spline code goes here
 
-  if(digitalRead(SWITCH_PIN)){
+  //abort switch
+  if(digitalReadFast(SWITCH_PIN)){
     finished();
+    while(digitalReadFast(SWITCH_PIN)); //wait until switch released
+    delay(20); //for switch bounce
   }
 
+  //splines 
   int currSeg = spline->getCurrentSegment();
-
+  
   if(currSeg <= SEGMENTS && !first_finished_flag){
   
     double theta = vehicle->getTheta();
     
     double x = vehicle->getX() + ROBOT_LENGTH * cos(theta);
     double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
-
-    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < LAST_COASTING_DISTANCE){//if on last segment and almost reached goal
+    
+    //velocity controller
+    if(currSeg == SEGMENTS && (spline->y(currSeg, 1.0) - y < vehicle->getEstimatedCoastingDistance(vehicle->getFilteredRobotVel()))){//if on last segment and almost reached goal
       motor->mBreak();
 
-    }else if(y > 8.8){
-      motorSpeed = (int) (VELOCITY_FILTER*max(K_P_VEL*(END_TARGET_VELOCITY - vehicle->getRobotVel()) + CONST_SPEED, 0) + (1-VELOCITY_FILTER)*motorSpeed);
-      motor->mSpeed(motorSpeed); 
-    }else if(y > 8.5){
+    }else if(y > 8.5 and vehicle->getFilteredRobotVel() > (vehicle->getTargetVelocity(y) + VELOCITY_TOLERANCE)) { //after first timing line and going too fast
       motor->mBreak();
+    }else if(y > 8.5){ 
+      motor->mSpeed(max(min(K_P_VEL * (vehicle->getTargetVelocity(y) - vehicle->getFilteredRobotVel()) + CONST_SPEED, MAX_MOTOR_ACCEL), 0));
     }else{
-      motor->mSpeed(motorSpeed);
+      motor->mSpeed(MAX_MOTOR_ACCEL);
     }
 
-    
+
     double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
     //Serial.print("segment: ");
     //Serial.println(currSeg);
@@ -773,11 +875,11 @@ void loop(){
 
     double errorX = x - xDesired;
 
-    double dError = (errorX - prevError)*LOOPS_PER_SEC;//meters/sec
+    dError += dERROR_FILTER * ((errorX - prevError)*LOOPS_PER_SEC - dError);// derivative of error, meters/sec
 
     prevError = errorX;
   
-    double angleDesired = -(K_p*errorX + K_d*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
+    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX + K_D_SPLINE_FOLLOW*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;
 
     //right positive
 
@@ -790,7 +892,7 @@ void loop(){
     //Serial.println(angleDesired*180.0/PI);
     front_servo->angle(angleDesired);
   
-    //checking
+    //checking for finishing spline
     if( spline->y(currSeg, 1.0) - y <= 0.01){//TODO:: Calibrate this measure...
       spline->nextSegment();
       startY = y;
@@ -799,21 +901,29 @@ void loop(){
     finished();
 
   }
-  if (loopCount >= LOOPS_PER_SEC/PRINTS_PER_SEC) {
+  //vehicle->logEncoderVelocities();
+  //Serial.print("Robot Vel: ");
+  //Serial.println(vehicle->getRobotVel());
+
+  if (loopCount >= LOOPS_PER_SEC/SLOWER_LOOPS_PER_SEC) {    //Stuff that should run slower than the main loop
+    
+    checkEncoderZeroVelocities(&front_enc);
+    checkEncoderZeroVelocities(&r_enc);
+    checkEncoderZeroVelocities(&l_enc);
+    
+    vehicle->logPose();
     digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
-    //vehicle->logPose();
-    Serial.print("Time (us): ");
-    Serial.println(loopTime);
     loopCount = 0;
   }
+  
 
   while(loopTime < 1e6/LOOPS_PER_SEC);
   
 }
 
-void checkEncoderZeroVelocities(struct encoder *enc, int tickTolerance){
-  if(enc->ticks - enc->prevTicks < 4){
-    enc->vel=0;
+void checkEncoderZeroVelocities(struct encoder *enc){
+  if(enc->ticks == enc->prevTicks){
+    enc->vel = 0;
   }
   enc->prevTicks = enc->ticks;
 }
