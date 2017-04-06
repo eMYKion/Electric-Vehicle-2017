@@ -1,8 +1,8 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
 
-#define TARGET_DISTANCE 10.32
-#define CAN_DISTANCE 0.3
-#define BIAS 0.05
+#define TARGET_DISTANCE 10
+#define CAN_DISTANCE 0
+#define BIAS 0
 
 //system
 #define SWITCH_PIN 22
@@ -156,7 +156,7 @@ struct encoder{
   double vel;//tickspersecond
 };
 
-void checkEncoderZeroVelocities(struct encoder *enc, int tickTolerance);
+void checkEncoderZeroVelocities(struct encoder *enc);
 
 void genericInterrupt(struct encoder *enc, int pinA, int pinB);
 
@@ -417,8 +417,8 @@ void Robot::logPose(void){
   Serial.print(this->getX() + ROBOT_LENGTH * cos(this->getTheta()));
   Serial.print(", y = ");
   Serial.print(this->getY() + ROBOT_LENGTH * sin(this->getTheta()));
-  Serial.print(", theta = ");
-  Serial.print(this->getTheta());
+  Serial.print(", theta (deg) = ");
+  Serial.print(this->getTheta()*180.0/PI);
   Serial.print(", phi = ");
   Serial.print(this->getPhi());
   Serial.println(")");
@@ -731,9 +731,9 @@ void loop(){
   
   //very occaisionally get CRC errors
   vehicle->updatePose();
-  checkEncoderZeroVelocities(&front_enc, 4);
-  checkEncoderZeroVelocities(&r_enc, 4);
-  checkEncoderZeroVelocities(&l_enc, 4);
+  checkEncoderZeroVelocities(&front_enc);
+  checkEncoderZeroVelocities(&r_enc);
+  checkEncoderZeroVelocities(&l_enc);
 
   //spline code goes here
 
@@ -743,12 +743,20 @@ void loop(){
 
   int currSeg = spline->getCurrentSegment();
 
-  if(currSeg <= SEGMENTS && !first_finished_flag){
+  double theta = vehicle->getTheta();
   
-    double theta = vehicle->getTheta();
-    
-    double x = vehicle->getX() + ROBOT_LENGTH * cos(theta);
-    double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
+  double x = vehicle->getX() + ROBOT_LENGTH * cos(theta);
+  double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
+
+  double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
+  double xDesired = spline->x(currSeg, segmentProgress);
+  double errorX = x - xDesired;
+
+  double dError = (errorX - prevError)*LOOPS_PER_SEC;//meters/sec
+  prevError = errorX;
+  double angleDesired = -(K_p*errorX + K_d*dError) + (theta - PI/2);
+
+  if(currSeg <= SEGMENTS && !first_finished_flag){
 
     if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < LAST_COASTING_DISTANCE){//if on last segment and almost reached goal
       motor->mBreak();
@@ -762,32 +770,7 @@ void loop(){
       motor->mSpeed(motorSpeed);
     }
 
-    
-    double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
-    //Serial.print("segment: ");
-    //Serial.println(currSeg);
-    
-    //Serial.print("segmentProgress: ");
-    //Serial.println(segmentProgress);
-    double xDesired = spline->x(currSeg, segmentProgress);
-
-    double errorX = x - xDesired;
-
-    double dError = (errorX - prevError)*LOOPS_PER_SEC;//meters/sec
-
-    prevError = errorX;
-  
-    double angleDesired = -(K_p*errorX + K_d*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;// switch the axes , looking 0.05 m ahead y direction
-
     //right positive
-
-    //Serial.print("corrected theta: ");
-    //Serial.println(theta - PI/2);
-    
-   
-    //double correctedAngle = signum(angleDesired)*max(abs(angleDesired), STEERING_SWEEP/2-0.1);
-    //Serial.print("steer angle(deg): ");
-    //Serial.println(angleDesired*180.0/PI);
     front_servo->angle(angleDesired);
   
     //checking
@@ -797,13 +780,21 @@ void loop(){
     }
   }else{//finished entire spline
     finished();
-
   }
+
+  if(!first_finished_flag){
+    Serial.print("X error: ");
+    Serial.print(errorX);
+    vehicle->logPose();
+  }
+  
   if (loopCount >= LOOPS_PER_SEC/PRINTS_PER_SEC) {
     digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
     //vehicle->logPose();
+    /*
     Serial.print("Time (us): ");
     Serial.println(loopTime);
+    */
     loopCount = 0;
   }
 
@@ -811,8 +802,8 @@ void loop(){
   
 }
 
-void checkEncoderZeroVelocities(struct encoder *enc, int tickTolerance){
-  if(enc->ticks - enc->prevTicks < 4){
+void checkEncoderZeroVelocities(struct encoder *enc){
+  if(enc->ticks == enc->prevTicks){
     enc->vel=0;
   }
   enc->prevTicks = enc->ticks;
