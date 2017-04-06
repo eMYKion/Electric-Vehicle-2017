@@ -1,8 +1,9 @@
-//Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect
+//Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect (worked at states)
 
-#define TARGET_DISTANCE 9.5
-#define CAN_DISTANCE 0.2
-#define BIAS 0.01
+#define LAST_COASTING_DISTANCE 0.05
+#define TARGET_DISTANCE 10
+#define CAN_DISTANCE 2//0.2
+#define BIAS 0//0.01
 
 //system pins
 #define SWITCH_PIN 22
@@ -12,6 +13,9 @@
 #define RELAY_PIN 2
 #define MOTOR_PIN 3
 
+//laser offsets
+#define LASER_OFFSET_THETA 0.00690
+
 //loop timing
 elapsedMicros loopTime;
 #define LOOPS_PER_SEC 200
@@ -19,13 +23,16 @@ elapsedMicros loopTime;
 int loopCount = 0;
 
 //velocity control
+
 #define END_TARGET_MAX_VELOCITY 0.8  //meters/sec
 #define END_TARGET_MIN_VELOCITY 0.3 //meters/sec
 #define TARGET_SLOW_DOWN_DISTANCE 0.5 //meters, the distance where vehicle slows down from END_TARGET_MAX_VELOCITY to END_TARGET_MIN_VELOCITY
-#define VELOCITY_TOLERANCE 0.2  //meters/sec
-#define K_P_VEL 200
+#define VELOCITY_TOLERANCE 0.5  //meters/sec
+
+#define END_TARGET_VELOCITY 0.5
+
+#define K_P_VEL 120
 #define CONST_SPEED 40
-#define VELOCITY_FILTER 0.1
 
 //for recalibrating the measures
 #define NO_RECALIBRATION -42
@@ -102,7 +109,7 @@ servo *front_servo;
 #define BACKWHEEL_TO_FRONT_DOWEL 0.265 //meters
 
 #define ROBOT_WHEELBASE 0.2 //meters
-#define ROBOT_LENGTH 0.262
+#define ROBOT_LENGTH 0.295
 
 
 #define ENCODER_FRONT_RESOLUTION 1440 //ticks
@@ -114,8 +121,6 @@ servo *front_servo;
 #define WHEEL_BACK_DIAMETER 0.09 //meters
 #define WHEEL_BACK_CIRCUMFERENCE  PI*WHEEL_BACK_DIAMETER //meters
 #define METERS_PER_TICK_BACK 0.001152  //WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
-
-#define ROBOT_LENGTH 0.262
 
 //hall sensor
 #include <ADC.h>
@@ -417,12 +422,7 @@ double Robot::getPhi(void){
 }
 
 double Robot::getTargetVelocity(double y_position){
-  if (TARGET_DISTANCE - y_position < TARGET_SLOW_DOWN_DISTANCE){ //when getting close to the target, slow down
-    return END_TARGET_MIN_VELOCITY;
-  }else{
-    return END_TARGET_MAX_VELOCITY;
-    return END_TARGET_MAX_VELOCITY;
-  }
+  return END_TARGET_VELOCITY;
 }
 
 double Robot::getEstimatedCoastingDistance(double robot_velocity){
@@ -495,14 +495,14 @@ void Robot::updatePose(void){
 }
 
 void Robot::logPose(void){
-  Serial.print("pose( x = ");
-  Serial.print(this->getX() + ROBOT_LENGTH * cos(this->getTheta()));
-  Serial.print(", y = ");
+  Serial.print("pose( x (cm) = ");
+  Serial.print(100*(this->getX() + ROBOT_LENGTH * cos(this->getTheta())));
+  Serial.print(", y (m) = ");
   Serial.print(this->getY() + ROBOT_LENGTH * sin(this->getTheta()));
-  Serial.print(", theta = ");
-  Serial.print(this->getTheta());
-  Serial.print(", phi = ");
-  Serial.print(this->getPhi());
+  Serial.print(", theta (deg)= ");
+  Serial.print(this->getTheta()*180/PI);
+  Serial.print(", phi (deg)= ");
+  Serial.print(this->getPhi()*180/PI);
   Serial.println(")");
 }
 
@@ -702,12 +702,11 @@ void setup() {
   //front_servo = new servo();
   
   vehicle = new Robot();
-  vehicle->makeUpdateRate200Hz();
-  
+ /* 
   //test if it's really 200 Hz
   vehicle->pollNavX();
   float starting_theta = vehicle->getTheta();
-/*
+
   //wait, polling at 200 Hz, until theta changes, to ensure we start at the beginning of a NavX cycle
   do{
     loopTime = 0;
@@ -767,26 +766,32 @@ void setup() {
 
   //wait for button to be pressed
   while(!digitalReadFast(SWITCH_PIN)){
-    Serial.print("Waiting for User Button...");
+    Serial.println("Waiting for User Button...");
     vehicle->pollNavX();
+    /*
     Serial.print("Angle: ");
     Serial.println(vehicle->getTheta()*180.0/PI);
+    */
     delay(100);
   }
   //wait for button to be released
   while(digitalReadFast(SWITCH_PIN)){delay(50);} 
   delay(500);
+
+  vehicle->makeUpdateRate200Hz();
   
   digitalWriteFast(LED_PIN, HIGH);
   vehicle->pollNavX();
-  vehicle->recalibrateMeasures(0, 0, PI/2, 0, 0, 0, 0);
+  vehicle->recalibrateMeasures(0, 0, PI/2 + LASER_OFFSET_THETA, 0, 0, 0, 0);
   
   while(!digitalReadFast(SWITCH_PIN)){delay(50);} //wait for button to be pressed to signal run start
   delay(500);
   vehicle->pollNavX();
   vehicle->recalibrateMeasures(0, 0, NO_RECALIBRATION, 0, 0, 0, 0);
+  /*
   Serial.print("Starting angle (degrees): ");
-  Serial.println(vehicle->getTheta()*180.0/PI);
+  Serial.println(vehicle->getTheta()*180.0/PI)
+  */
   
   //spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
   /* format:
@@ -794,7 +799,6 @@ void setup() {
                                  y_point0, y_point1, ...
                                  velocity_x_point0, ...
                                  velocity_y_point0, ...};*/
-
 
   float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
                                  0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
@@ -817,9 +821,9 @@ double dError = 0;
 //for spline follower
 #define  K_P_SPLINE_FOLLOW  2.0
 #define K_D_SPLINE_FOLLOW 1.0
-#define dERROR_FILTER 0.2
+#define dERROR_FILTER 0.5
 
-#define MAX_MOTOR_ACCEL 60
+#define MAX_MOTOR_ACCEL 55
 int motorSpeed = MAX_MOTOR_ACCEL;
 
 
@@ -833,7 +837,6 @@ void loop(){
 
   vehicle->updatePose();
   vehicle->filterRobotVel();
-
 
   //abort switch
   if(digitalReadFast(SWITCH_PIN)){
@@ -853,18 +856,7 @@ void loop(){
     double y = vehicle->getY() + ROBOT_LENGTH * sin(theta);
     
     //velocity controller
-    if(currSeg == SEGMENTS && (spline->y(currSeg, 1.0) - y < vehicle->getEstimatedCoastingDistance(vehicle->getFilteredRobotVel()))){//if on last segment and almost reached goal
-      motor->mBreak();
-
-    }else if(y > 8.5 and vehicle->getFilteredRobotVel() > (vehicle->getTargetVelocity(y) + VELOCITY_TOLERANCE)) { //after first timing line and going too fast
-      motor->mBreak();
-    }else if(y > 8.5){ 
-      motor->mSpeed(max(min(K_P_VEL * (vehicle->getTargetVelocity(y) - vehicle->getFilteredRobotVel()) + CONST_SPEED, MAX_MOTOR_ACCEL), 0));
-    }else{
-      motor->mSpeed(MAX_MOTOR_ACCEL);
-    }
-
-
+    
     double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
     //Serial.print("segment: ");
     //Serial.println(currSeg);
@@ -879,7 +871,19 @@ void loop(){
 
     prevError = errorX;
   
-    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX + K_D_SPLINE_FOLLOW*dError) + (theta - PI/2);//atan(-errorX / 0.20) - theta + PI/2;
+    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX + K_D_SPLINE_FOLLOW*dError);//atan(-errorX / 0.20) + theta - PI/2;
+    //TODO:: INVESTIGATE
+    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < LAST_COASTING_DISTANCE){//if on last segment and almost reached goal
+      motor->mBreak();
+
+    }else if(y > 8.8){
+      motorSpeed = (int) (ROBOT_VELOCITY_FILTER*max(K_P_VEL*(END_TARGET_VELOCITY - vehicle->getRobotVel()) + CONST_SPEED, 0) + (1-ROBOT_VELOCITY_FILTER)*motorSpeed);
+      motor->mSpeed(motorSpeed);
+    }else if(y > 8.5){
+      motor->mBreak();
+    }else{
+      motor->mSpeed(motorSpeed);
+    }
 
     //right positive
 
@@ -904,6 +908,8 @@ void loop(){
   //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
+  
+  vehicle->logPose();
 
   if (loopCount >= LOOPS_PER_SEC/SLOWER_LOOPS_PER_SEC) {    //Stuff that should run slower than the main loop
     
@@ -911,7 +917,7 @@ void loop(){
     checkEncoderZeroVelocities(&r_enc);
     checkEncoderZeroVelocities(&l_enc);
     
-    vehicle->logPose();
+    //vehicle->logPose();
     digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
     loopCount = 0;
   }
