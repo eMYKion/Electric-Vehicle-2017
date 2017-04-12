@@ -1,9 +1,7 @@
 //Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect (worked at states)
 
-#define LAST_COASTING_DISTANCE 0.05
+#define LAST_COASTING_DISTANCE 0.005
 #define TARGET_DISTANCE 10
-#define CAN_DISTANCE 2//0.2
-#define BIAS 0//0.01
 
 //system pins
 #define SWITCH_PIN 22
@@ -184,14 +182,16 @@ struct encoder{
   volatile long int ticks;
   elapsedMicros sinceCalc;
   long int prevTicks;
-  double vel;//tickspersecond
+  int vel;//tickspersecond
+  double filteredVel;//tickspersecond
+  double metersPerTick;
 };
 
 void checkEncoderZeroVelocities(struct encoder *enc, int tickTolerance);
 
 void genericInterrupt(struct encoder *enc, int pinA, int pinB);
 
-int setupEncoder(struct encoder *enc, int pinA, int pinB, void (*interrupt)(void));
+int setupEncoder(struct encoder *enc, int pinA, int pinB, void (*interrupt)(void), double metersPerTick);
 
 void interruptFrontEnc(void);
 void interruptREnc(void);
@@ -206,7 +206,10 @@ struct encoder l_enc;
 #define SENSOR_WEIGHT_BACK_ENCODER_L 0.50
 #define SENSOR_WEIGHT_BACK_ENCODER_R 0.50
 #define SENSOR_WEIGHT_FRONT_ENCODER 0.00
-#define ROBOT_VELOCITY_FILTER 0.08
+#define SENSOR_VEL_WEIGHT_BACK_ENCODER_L 0.1
+#define SENSOR_VEL_WEIGHT_BACK_ENCODER_R 0.1
+#define SENSOR_VEL_WEIGHT_FRONT_ENCODER 0.8
+#define ROBOT_VELOCITY_FILTER 0.05
 #define ROBOT_X_VELOCITY_FILTER 0.08
 #define ROBOT_Y_VELOCITY_FILTER 0.08
 
@@ -242,8 +245,6 @@ class Robot{
     double getREncVel(void);//ticks/sec
     double getLEncVel(void);//ticks/sec
     double getRobotVel(void);//meters/sec
-    void filterRobotVel(void);
-    double getFilteredRobotVel(void);
     double filtered_robot_vel;  //meters/sec
     double filtered_robot_x_vel; //meters/sec
     double filtered_robot_y_vel;  //meters/sec
@@ -251,7 +252,7 @@ class Robot{
     
     void recalibrateMeasures(double x, double y, double theta, double phi, double u, int long l_enc_ticks, int long r_enc_ticks);
     void updatePose(void);
-    void logPose(void);
+    void logPose(double wanted_x);
     void logEncoders(void);
     void logEncoderVelocities(void);
     
@@ -289,9 +290,9 @@ Robot::Robot(void){
   this->_r_enc = &r_enc;
   this->_l_enc = &l_enc;
 
-  setupEncoder(&front_enc, FRONT_ENC_PIN_A, FRONT_ENC_PIN_B, interruptFrontEnc);
-  setupEncoder(&r_enc, R_ENC_PIN_A, R_ENC_PIN_B, interruptREnc);
-  setupEncoder(&l_enc, L_ENC_PIN_A, L_ENC_PIN_B, interruptLEnc);
+  setupEncoder(&front_enc, FRONT_ENC_PIN_A, FRONT_ENC_PIN_B, interruptFrontEnc, METERS_PER_TICK_FRONT);
+  setupEncoder(&r_enc, R_ENC_PIN_A, R_ENC_PIN_B, interruptREnc, METERS_PER_TICK_BACK);
+  setupEncoder(&l_enc, L_ENC_PIN_A, L_ENC_PIN_B, interruptLEnc, METERS_PER_TICK_BACK);
 
   this->_theta_offset = 0;
   this->_phi_offset = 0;
@@ -426,7 +427,7 @@ double Robot::getTargetVelocity(double y_position){
 }
 
 double Robot::getEstimatedCoastingDistance(double robot_velocity){
-  return 0.1*robot_velocity; //very crude, but will probably work
+  return 0.1*robot_velocity*robot_velocity + 0.212*robot_velocity;
 }
 
 long int Robot::getFrontEnc(void){//ticks
@@ -442,26 +443,18 @@ long int Robot::getLEnc(void){//ticks
 
 
 double Robot::getFrontEncVel(void){//ticks/sec
-  return this->_front_enc->vel;
+  return this->_front_enc->filteredVel;
 }
 
 double Robot::getREncVel(void){//ticks/sec
-  return this->_r_enc->vel;
+  return this->_r_enc->filteredVel;
 }
 double Robot::getLEncVel(void){//ticks/sec
-  return this->_l_enc->vel;
+  return this->_l_enc->filteredVel;
 }
 
 double Robot::getRobotVel(void){//meters/sec
-  return SENSOR_WEIGHT_BACK_ENCODER_L*this->_l_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_BACK_ENCODER_R*this->_r_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_FRONT_ENCODER*this->_front_enc->vel*METERS_PER_TICK_FRONT; 
-}
-
-void Robot::filterRobotVel(void){
-  this->filtered_robot_vel += ROBOT_VELOCITY_FILTER*(SENSOR_WEIGHT_BACK_ENCODER_L*this->_l_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_BACK_ENCODER_R*this->_r_enc->vel*METERS_PER_TICK_BACK + SENSOR_WEIGHT_FRONT_ENCODER*this->_front_enc->vel*METERS_PER_TICK_FRONT - this->filtered_robot_vel);
-}
-
-double Robot::getFilteredRobotVel(void){
-  return this->filtered_robot_vel;
+  return SENSOR_VEL_WEIGHT_BACK_ENCODER_L*this->_l_enc->filteredVel*METERS_PER_TICK_BACK + SENSOR_VEL_WEIGHT_BACK_ENCODER_R*this->_r_enc->filteredVel*METERS_PER_TICK_BACK + SENSOR_VEL_WEIGHT_FRONT_ENCODER*this->_front_enc->filteredVel*METERS_PER_TICK_FRONT*cos(this->getPhi()); 
 }
 
 void Robot::updatePose(void){
@@ -494,15 +487,19 @@ void Robot::updatePose(void){
   this->_y += dy; 
 }
 
-void Robot::logPose(void){
+void Robot::logPose(double error_x){
   Serial.print("pose( x (cm) = ");
   Serial.print(100*(this->getX() + ROBOT_LENGTH * cos(this->getTheta())));
+  Serial.print(", x-err (cm) = ");
+  Serial.print(error_x*100);  
   Serial.print(", y (m) = ");
   Serial.print(this->getY() + ROBOT_LENGTH * sin(this->getTheta()));
   Serial.print(", theta (deg)= ");
   Serial.print(this->getTheta()*180/PI);
   Serial.print(", phi (deg)= ");
   Serial.print(this->getPhi()*180/PI);
+  Serial.print(", vel (m/s)= ");
+  Serial.print(this->getRobotVel());
   Serial.println(")");
 }
 
@@ -800,7 +797,7 @@ void setup() {
                                  velocity_x_point0, ...
                                  velocity_y_point0, ...};*/
 
-  float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
+  float spline_data[POINTS*4] = {0.0, 0.0, 0.0,
                                  0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
                                  0.01*sin(vehicle->getTheta()), 0.0, -0.01*sin(vehicle->getTheta()),
                                  0.01*cos(vehicle->getTheta()), 2.0, 0.01*cos(vehicle->getTheta())};
@@ -819,14 +816,15 @@ double prevError=0;
 double dError = 0;
 
 //for spline follower
-#define  K_P_SPLINE_FOLLOW  2.0
+#define  K_P_SPLINE_FOLLOW  2.8
 #define K_D_SPLINE_FOLLOW 1.0
 #define dERROR_FILTER 0.5
 
-#define MAX_MOTOR_ACCEL 55
+#define MAX_MOTOR_ACCEL 150  //PWM 0-256
+#define ROBOT_TEST_VELOCITY 1.0
 int motorSpeed = MAX_MOTOR_ACCEL;
 
-
+bool started_breaking = false;
 
 void loop(){
 
@@ -836,7 +834,6 @@ void loop(){
   //very occaisionally get CRC errors
 
   vehicle->updatePose();
-  vehicle->filterRobotVel();
 
   //abort switch
   if(digitalReadFast(SWITCH_PIN)){
@@ -847,6 +844,8 @@ void loop(){
 
   //splines 
   int currSeg = spline->getCurrentSegment();
+
+
   
   if(currSeg <= SEGMENTS && !first_finished_flag){
   
@@ -871,18 +870,20 @@ void loop(){
 
     prevError = errorX;
   
-    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX + K_D_SPLINE_FOLLOW*dError);//atan(-errorX / 0.20) + theta - PI/2;
+    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX/(vehicle->getRobotVel() + 0.2) + K_D_SPLINE_FOLLOW*dError)/(vehicle->getRobotVel() + 0.2);//atan(-errorX / 0.20) + theta - PI/2;
     //TODO:: INVESTIGATE
-    if(currSeg == SEGMENTS && spline->y(currSeg, 1.0) - y < LAST_COASTING_DISTANCE){//if on last segment and almost reached goal
+    if(started_breaking || vehicle->getRobotVel() > ROBOT_TEST_VELOCITY){
+      if(!started_breaking){
+        Serial.println("Brakes, ");
+        started_breaking = true;
+      }
       motor->mBreak();
-
-    }else if(y > 8.8){
-      motorSpeed = (int) (ROBOT_VELOCITY_FILTER*max(K_P_VEL*(END_TARGET_VELOCITY - vehicle->getRobotVel()) + CONST_SPEED, 0) + (1-ROBOT_VELOCITY_FILTER)*motorSpeed);
-      motor->mSpeed(motorSpeed);
-    }else if(y > 8.5){
-      motor->mBreak();
+      if (vehicle->getRobotVel() > 0){
+        vehicle->logPose(errorX);
+      }
     }else{
-      motor->mSpeed(motorSpeed);
+      motor->mSpeed(MAX_MOTOR_ACCEL);
+      vehicle->logPose(errorX);
     }
 
     //right positive
@@ -903,13 +904,12 @@ void loop(){
     }
   }else{//finished entire spline
     finished();
+    vehicle->logPose(vehicle->getX() + ROBOT_LENGTH * cos(vehicle->getTheta()));
 
   }
   //vehicle->logEncoderVelocities();
   //Serial.print("Robot Vel: ");
   //Serial.println(vehicle->getRobotVel());
-  
-  vehicle->logPose();
 
   if (loopCount >= LOOPS_PER_SEC/SLOWER_LOOPS_PER_SEC) {    //Stuff that should run slower than the main loop
     
@@ -929,19 +929,22 @@ void loop(){
 
 void checkEncoderZeroVelocities(struct encoder *enc){
   if(enc->ticks == enc->prevTicks){
+    enc->filteredVel = 0;
     enc->vel = 0;
   }
   enc->prevTicks = enc->ticks;
 }
 
 void genericInterrupt(struct encoder *enc, int pinA, int pinB){
-
-  enc->vel = 1000000 / enc->sinceCalc;
-  enc->sinceCalc = 0;
-  
   enc->currA = digitalReadFast(pinA);
   enc->currB = digitalReadFast(pinB);
-
+  
+  enc->vel = 1000000 / enc->sinceCalc;
+  enc->sinceCalc = 0;
+  if(enc->vel < 10/enc->metersPerTick){
+    enc->filteredVel += ROBOT_VELOCITY_FILTER*(enc->vel - enc->filteredVel);
+  }
+  
   int currA = enc->currA;
   int currB = enc->currB;
 
@@ -978,10 +981,12 @@ void genericInterrupt(struct encoder *enc, int pinA, int pinB){
   enc->prevB = enc->currB;
 }
 
-int setupEncoder(struct encoder *enc, int pinA, int pinB, void (*interrupt)(void)){
+int setupEncoder(struct encoder *enc, int pinA, int pinB, void (*interrupt)(void), double metersPerTick){
   enc->ticks=0;
   enc->vel=0;
+  enc->filteredVel = 0;
   enc->sinceCalc=0;
+  enc->metersPerTick = metersPerTick;
   
   pinMode(pinA, INPUT);
   pinMode(pinB, INPUT);
