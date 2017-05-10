@@ -1,17 +1,18 @@
-//Goes around the cans using splines, NavX MXP, encoders, and servomotor/hall effect (worked at states)
+//Goes around the cans using circle, NavX MXP, encoders, and servomotor/hall effect (worked at states)
+#include <Servo.h>
+#include <ADC.h>
+#include <SPI.h>
+#include "IMURegisters.h"
 
-#define LAST_COASTING_DISTANCE 0.005
-#define TARGET_DISTANCE 10
+#define TARGET_DISTANCE (10 + 0.02)
 #define CAN_DISTANCE 0.01  //0.2
-#define BIAS -0.025    //0.01
+#define BIAS -0.030    //0.01
 
 //geometry
-#define BACKWHEEL_TO_FRONT_DOWEL 0.265 //meters
-
 #define ROBOT_WHEELBASE 0.21 //meters
 #define ROBOT_LENGTH 0.295
 
-
+//encoder constant values
 #define ENCODER_FRONT_RESOLUTION 1440 //ticks
 #define WHEEL_FRONT_DIAMETER 0.08 //meters
 #define WHEEL_FRONT_CIRCUMFERENCE  PI*WHEEL_FRONT_DIAMETER //meters
@@ -23,7 +24,6 @@
 #define METERS_PER_TICK_BACK 0.001152  //WHEEL_BACK_CIRCUMFERENCE / ENCODER_BACK_RESOLUTION //meters/tick
 
 //hall sensor
-#include <ADC.h>
 #define HALL_PIN A10
 #define HALL_VAL_MAX 65535
 #define HALL_VAL_MIN 4005
@@ -58,28 +58,16 @@ elapsedMillis timeFromStart;
 int loopCount = 0;
 
 //velocity control
-
-#define END_TARGET_MAX_VELOCITY 0.8  //meters/sec
-#define END_TARGET_MIN_VELOCITY 0.3 //meters/sec
-#define TARGET_SLOW_DOWN_DISTANCE 0.5 //meters, the distance where vehicle slows down from END_TARGET_MAX_VELOCITY to END_TARGET_MIN_VELOCITY
-#define VELOCITY_TOLERANCE 0.5  //meters/sec
-
 #define END_TARGET_VELOCITY 0.5
 
 #define K_P_VEL 120
 #define LOWER_CONST_SPEED 40
-#define MAX_MOTOR_ACCEL 150
+#define MAX_MOTOR_ACCEL 100
 #define MAX_SPEED 2
 #define HIGHER_CONST_SPEED 60
 
 //for recalibrating the measures
 #define NO_RECALIBRATION -42
-
-//Splines
-#define SPLINE_DISTANCE_TOLERANCE 0.05//5cm of point to point tolerance for splines
-
-#define SEGMENTS 2 //p1 -> p2 -> p3 defined to be (number of points - 1)
-#define POINTS 3
 
 class Motor{
   public:
@@ -110,8 +98,6 @@ void Motor::mSpeed(int PWM){
 Motor *motor;
 
 //servo
-#include <Servo.h>
-
 #define SERVO_PIN 6
 
 #define SERVO_PWM_MIN 0
@@ -119,6 +105,8 @@ Motor *motor;
 
 #define STEERING_SWEEP PI/3//radians
 #define PWM_ANGLE_TO_MEASURE(measure) -(SERVO_PWM_MAX - SERVO_PWM_MIN)/(STEERING_SWEEP)*(measure - PI/6) + SERVO_PWM_MIN
+
+#define SERVO_OFFSET 21
 
 class servo{
   public:
@@ -133,8 +121,6 @@ servo::servo(void){
   this->servoobj->attach(SERVO_PIN);  // attaches the servo to the servo object
   this->servoobj->attach(SERVO_PIN, 1000, 2000); // some motors need min/max setting
 }
-
-#define SERVO_OFFSET 21
 
 void servo::angle(float ang){
   this->servoobj->write((int)(PWM_ANGLE_TO_MEASURE(ang) - SERVO_OFFSET));
@@ -224,11 +210,8 @@ struct encoder l_enc;
 #define ROBOT_X_VELOCITY_FILTER 0.08
 #define ROBOT_Y_VELOCITY_FILTER 0.08
 
-#include <SPI.h>
-#include "IMURegisters.h"
-
+//SPI
 #define CS_PIN 10
-
 
 //robot
 class Robot{
@@ -323,6 +306,40 @@ void Robot::setupNavX(void){
   SPI.setClockDivider(8); /* 16Mhz/32 = 500kHz; /16=1Mhz; /8=2Mhz */ 
 }
 
+/*void Robot::pollNavX(void){
+  uint8_t spi_crc;
+  uint8_t spi_data[3];
+
+  // Transmit SPI data
+  do{
+    spi_data[0] = 0;   // Start register address (high bit clear == read)
+    spi_data[1] = NAVX_REG_YAW_H + 1; // Number of bytes to read
+    spi_data[2] = IMURegisters::getCRC(spi_data,2);
+    
+    digitalWriteFast(SS, LOW);
+    
+    for ( int spi_data_index = 0; spi_data_index < 3; spi_data_index++ ) {
+        SPI.transfer(spi_data[spi_data_index]);
+    }
+    
+    digitalWriteFast(SS, HIGH);
+    
+    delayMicroseconds(200); // Read 0xFFs until ready
+    digitalWriteFast(SS, LOW);
+    for ( int x = 0; x <= NAVX_REG_YAW_H + 1; x++ ) {
+        this->_spi_data[x] = SPI.transfer((byte)0xFF);
+    }
+    digitalWriteFast(SS, HIGH);  
+    spi_crc = IMURegisters::getCRC(this->_spi_data, NAVX_REG_YAW_H + 1);
+
+    //SPI checksum
+    if (spi_crc != this->_spi_data[NAVX_REG_YAW_H + 1]){
+      Serial.print("SPI CRC ERROR!  ");
+      Serial.println(spi_crc);
+    }
+  }while(spi_crc != this->_spi_data[NAVX_REG_YAW_H + 1]);
+
+}*/
 void Robot::pollNavX(void){
   uint8_t spi_crc;
   uint8_t spi_data[3];
@@ -357,6 +374,7 @@ void Robot::pollNavX(void){
   }while(spi_crc != this->_spi_data[32]);
 
 }
+
 
 
 int Robot::getNavXStatus(void){
@@ -418,11 +436,6 @@ double Robot::getTheta(void){
   *angle = this->_spi_data[NAVX_REG_YAW_L];
   *(angle+1) = this->_spi_data[NAVX_REG_YAW_H];
   this->_theta = -PI/180*(double)IMURegisters::decodeProtocolSignedHundredthsFloat(angle);//pointer of lower of two bytes
-  /*Serial.print("[theta_f = ");
-  Serial.print(this->_theta);
-  Serial.print(" - ");
-  Serial.print(this->_theta_offset);
-  Serial.println("]");*/
 
   free(angle);
   return this->_theta - this->_theta_offset;
@@ -512,14 +525,16 @@ void Robot::logPose(double error_x){
   Serial.print(", vel (m/s)= ");
   Serial.print(this->getRobotVel());
   Serial.print(", time (s)= ");
-  Serial.print(timeFromStart/1000.0);
+  Serial.print(timeFromStart/1000.0, 3);
   Serial.println(")");
 }
 
-long prev_ticks_FrontEnc = 0;
-long prev_ticks_REnc = 0;
-long prev_ticks_LEnc = 0;
 void Robot::logEncoders(void){
+  
+  static long prev_ticks_FrontEnc = 0;
+  static long prev_ticks_REnc = 0;
+  static long prev_ticks_LEnc = 0;
+
   Serial.print("encoders( front = ");
   Serial.print(this->getFrontEnc()*METERS_PER_TICK_FRONT, 3);
   Serial.print(", right = ");
@@ -553,169 +568,6 @@ void Robot::logEncoderVelocities(void){
 
 Robot *vehicle;
 
-
-
-class Splines{
-  public:
-    Splines(void);
-
-    void loadSplineData(float *spline_data);
-
-    //n is number of points
-    //this defines n-1 SEGMENTS (1,2,...,n-1)
-    
-    void printData(void);
-
-    float v_f(int seg, int axis);
-    float v_i(int seg, int axis);
-    float r_f(int seg, int axis);
-    float r_i(int seg, int axis);
-
-    float a(int seg, int axis);
-    float b(int seg, int axis);
-    float c(int seg, int axis);
-    float d(int seg, int axis);
-    
-    float x(int seg, float t);
-    float y(int seg, float t);
-
-    bool closeTo(float x0, float y0, float x1, float y1);
-
-    int getCurrentSegment(void);
-    void nextSegment(void);
-
-  private:
-    float *x_vels;
-    float *y_vels;
-    float *x_pos;
-    float *y_pos;
-
-    int curr_segment;//goes from 1,2,3,...,n-1
-    
-};
-
-Splines::Splines(void){
-  this->x_vels = new float[POINTS];
-  this->y_vels = new float[POINTS];
-  this->x_pos = new float[POINTS];
-  this->y_pos = new float[POINTS];
-
-  this->curr_segment = 1;
-}
-
-void Splines::loadSplineData(float *spline_data){
-  
-  for(int i = 0; i<POINTS; i++){
-    this->x_pos[i] = spline_data[i];
-    this->y_pos[i] = spline_data[POINTS + i];
-
-    this->x_vels[i] = spline_data[POINTS*2 + i];
-    this->y_vels[i] = spline_data[POINTS*3 + i];
-  }
-}
-
-void Splines::printData(void){
-  Serial.println("x_vel[i] | y_vel[i] | x_pos[i] | y_pos[i]");
-  for(int i=0;i<POINTS;i++){
-    Serial.print(this->x_vels[i]);
-    Serial.print(" | ");
-    Serial.print(this->y_vels[i]);
-    Serial.print(" | ");
-    Serial.print(this->x_pos[i]);
-    Serial.print(" | ");
-    Serial.print(this->y_pos[i]);
-    Serial.print("\n");
-  }
-}
-
-float Splines::v_f(int seg, int axis){
-  if(axis==1){
-    return this->y_vels[seg];
-  }else{
-    return this->x_vels[seg]; 
-  }
-}
-float Splines::v_i(int seg, int axis){
-  if(axis==1){
-    return this->y_vels[seg-1];
-  }else{
-    return this->x_vels[seg-1]; 
-  }
-}
-
-float Splines::r_f(int seg, int axis){
-  if(axis==1){
-    return this->y_pos[seg];
-  }else{
-    return this->x_pos[seg]; 
-  }  
-}
-
-float Splines::r_i(int seg, int axis){
-  if(axis==1){
-    return this->y_pos[seg-1];
-  }else{
-    return this->x_pos[seg-1]; 
-  }
-}
-
-float Splines::a(int seg, int axis){
-  return this->v_f(seg, axis) + this->v_i(seg,axis) -2*(this->r_f(seg, axis)) + 2*(this->r_i(seg, axis));
-}
-
-float Splines::b(int seg, int axis){
-  return -(this->v_f(seg,axis)) -2*(this->v_i(seg,axis)) + 3*(this->r_f(seg,axis)) -3*(this->r_i(seg,axis));
-}
-
-float Splines::c(int seg, int axis){
-  return this->v_i(seg, axis);  
-}
-
-float Splines::d(int seg, int axis){
-  return this->r_i(seg, axis);
-}
-
-//this is what the user cares about
-float Splines::x(int seg, float t){//t must be between 0.0 and 1.0
-  if((t < 0.0 ) || (t > 1.0)){
-    //Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
-  }
-  return this->a(seg,0)*(t*t*t) + this->b(seg,0)*(t*t) + this->c(seg,0)*(t) + this->d(seg,0);
-}
-
-float Splines::y(int seg, float t){//t must be between 0.0 and 1.0
- if((t < 0.0 ) || (t > 1.0)){
-  //Serial.println("ACCESSING SPLINE PARAMETER OUT OF BOUNDS");
- }
- return this->a(seg,1)*(t*t*t) + this->b(seg,1)*(t*t) + this->c(seg,1)*(t) + this->d(seg,1);
-}
-
-bool Splines::closeTo(float x0, float y0, float x1, float y1){
-  return sqrt((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0)) < SPLINE_DISTANCE_TOLERANCE;
-}
-
-int Splines::getCurrentSegment(void){
-  return this->curr_segment;
-}
-
-void Splines::nextSegment(void){
-  this->curr_segment++;
-}
-
-//math
-
-int signum(float x){
-  if(x>0){
-    return 1;
-  }else if(x<0){
-    return -1;
-  }else{
-    return 0;  
-  }    
-}
-
-Splines *spline;
-
 void setup() {
   Serial.begin(9600);
   pinMode(LED_PIN, OUTPUT);
@@ -727,37 +579,10 @@ void setup() {
   //front_servo = new servo();
   
   vehicle = new Robot();
- /* 
-  //test if it's really 200 Hz
-  vehicle->pollNavX();
-  float starting_theta = vehicle->getTheta();
-
-  //wait, polling at 200 Hz, until theta changes, to ensure we start at the beginning of a NavX cycle
-  do{
-    loopTime = 0;
-    vehicle->pollNavX();
-    while(loopTime < 1e6/200);
-  }while(vehicle->getTheta() == starting_theta);
-  
-  delayMicroseconds(1e6/200 * 3); //wait out the rest of that cycle
-  
-  //prints out values at 200 hz so we can see if the update rate is right
-  for(int loopCounter = 0; loopCounter < 50; loopCounter++){
-    for(int loopCounter2 = 0; loopCounter2 < 4; loopCounter2++){
-      loopTime = 0;
-      vehicle->pollNavX();
-      Serial.print(vehicle->getTheta()/PI*180);
-      Serial.print(" ");
-      while(loopTime < 1e6/200);
-    }
-    Serial.println(" ");
-  }
-  */
   front_servo->angle(0);
 
   //Wait for NavX to Calibrate
   Serial.println("Waiting for NavX...");
-  
   
   vehicle->pollNavX();
   while(vehicle->getNavXOpStatus()!=NAVX_OP_STATUS_NORMAL){
@@ -784,27 +609,27 @@ void setup() {
   Serial.println("NAVX_OP_STATUS_NORMAL");
   
   //navx operation normal, wait for human//TODO change this to wait for calibration finish
-
   
   pinMode(SWITCH_PIN, INPUT); 
 
 
   //wait for button to be pressed
   while(!digitalReadFast(SWITCH_PIN)){
-    Serial.println("Waiting for User Button...");
+    Serial.print("Waiting for User Button... Angle(deg):");
     vehicle->pollNavX();
 
-    digitalWriteFast(LED_BUILTIN, !digitalReadFast(LED_BUILTIN));
-    /*
-    Serial.print("Angle: ");
     Serial.println(vehicle->getTheta()*180.0/PI);
-    */
+
+    digitalWriteFast(LED_BUILTIN, !digitalReadFast(LED_BUILTIN));
+    
     delay(100);
   }
+  
   //wait for button to be released
   while(digitalReadFast(SWITCH_PIN)){
+    
     delay(50);
-    vehicle->pollNavX();
+    //vehicle->pollNavX();
 
     digitalWriteFast(LED_PIN, !digitalReadFast(LED_PIN));
   } 
@@ -813,6 +638,7 @@ void setup() {
   vehicle->makeUpdateRate200Hz();
   
   digitalWriteFast(LED_PIN, HIGH);
+  
   vehicle->pollNavX();
   vehicle->recalibrateMeasures(0, 0, PI/2 + LASER_OFFSET_THETA, 0, 0, 0, 0);
   
@@ -823,43 +649,20 @@ void setup() {
 
     digitalWriteFast(LED_PIN, abs(vehicle->getTheta() - STARTING_ROBOT_ANGLE) < 0.01);
    } //wait for button to be pressed to signal run start
+   
   delay(500);
   vehicle->pollNavX();
   vehicle->recalibrateMeasures(0, 0, NO_RECALIBRATION, 0, 0, 0, 0);
-  /*
-  Serial.print("Starting angle (degrees): ");
-  Serial.println(vehicle->getTheta()*180.0/PI)
-  */
   
-  //spline data format is x0 , x1, ..., y0, y1, ..., v_x0, v_x1, ..., v_y0, v_y1, ...
-  /* format:
-  float spline_data[POINTS*4] = {x_point0, x_point1, ...
-                                 y_point0, y_point1, ...
-                                 velocity_x_point0, ...
-                                 velocity_y_point0, ...};*/
-
-  float spline_data[POINTS*4] = {0.0, 1.0-CAN_DISTANCE/2.0 + BIAS, 0.0,
-                                 0.0, TARGET_DISTANCE/2.0, TARGET_DISTANCE,
-                                 0.01*sin(vehicle->getTheta()), 0.0, -0.01*sin(vehicle->getTheta()),
-                                 0.01*cos(vehicle->getTheta()), 2.0, 0.01*cos(vehicle->getTheta())};
-  //e.g.  d(4, 1) means d_y at the 4th segment
-  //use of small velocities at beginning and end is to get the spline pointing in the right direction
-  
-  spline = new Splines();
-  spline->loadSplineData(spline_data);
-
   timeFromStart = 0;
 }
-
-//using y as the internal parameter
-double startY = 0;
 
 double prevError=0;
 double dError = 0;
 
-//for spline follower
-#define  K_P_SPLINE_FOLLOW  5
-#define K_D_SPLINE_FOLLOW 1.0
+//for arc follower
+#define  K_P_ARC_FOLLOW  5
+#define K_D_ARC_FOLLOW 1.0
 #define dERROR_FILTER 0.5
 
 int motorSpeed = MAX_MOTOR_ACCEL;
@@ -872,7 +675,6 @@ void loop(){
   loopCount++;
   
   //very occaisionally get CRC errors
-
   vehicle->updatePose();
 
   //abort switch
@@ -881,9 +683,6 @@ void loop(){
     while(digitalReadFast(SWITCH_PIN)); //wait until switch released
     delay(20); //for switch bounce
   }
-
-  //splines 
-  int currSeg = spline->getCurrentSegment();
   
   if(!first_finished_flag){
   
@@ -894,7 +693,6 @@ void loop(){
     
     //velocity controller
     
-    double segmentProgress = (y - startY) / (spline->y(currSeg, 1.0) - startY);
     double xDesired = sqrt(pow(RADIUS_OF_CIRCLE, 2) - pow((y - TARGET_DISTANCE/2),2)) - RADIUS_OF_CIRCLE + SIDE;
 
     double errorX = x - xDesired;
@@ -903,10 +701,14 @@ void loop(){
 
     prevError = errorX;
   
-    double angleDesired = -(K_P_SPLINE_FOLLOW*errorX/(vehicle->getRobotVel() + 0.2) + K_D_SPLINE_FOLLOW*dError)/(vehicle->getRobotVel() + 0.2) - SERVO_BIAS_ANGLE;//atan(-errSERVO_BIAS_ANGLEorX / 0.20) + theta - PI/2;
+    double angleDesired = -(K_P_ARC_FOLLOW*errorX/(vehicle->getRobotVel() + 0.2) + K_D_ARC_FOLLOW*dError)/(vehicle->getRobotVel() + 0.2) - SERVO_BIAS_ANGLE;//atan(-errSERVO_BIAS_ANGLEorX / 0.20) + theta - PI/2;
     //TODO:: INVESTIGATE
-    if(TARGET_DISTANCE - y < vehicle->getEstimatedCoastingDistance(vehicle->getRobotVel())){//if on last segment and almost reached goal
+    if(y >= TARGET_DISTANCE){
+      finished();
+    }else if(TARGET_DISTANCE - y < vehicle->getEstimatedCoastingDistance(vehicle->getRobotVel())){//if on last segment and almost reached goal
       motor->mBreak();
+    }else if((y > TARGET_DISTANCE/2 - 0.02) and (y < TARGET_DISTANCE/2 + 0.1)){
+      motor->mSpeed(0);
     }else if(y < 8.5){
       motor->mSpeed(min(K_P_VEL*(MAX_SPEED - vehicle->getRobotVel()) + HIGHER_CONST_SPEED, MAX_MOTOR_ACCEL));
     }else if(y > 8.8){
@@ -920,18 +722,11 @@ void loop(){
 
     front_servo->angle(angleDesired);
   
-    //checking for finishing spline
-    if( spline->y(currSeg, 1.0) - y <= 0.0001){//TODO:: Calibrate this measure...
-      spline->nextSegment();
-      startY = y;
-    }
-    if(!(currSeg == SEGMENTS && vehicle->getRobotVel() == 0)){
+    if(vehicle->getRobotVel() != 0){
       vehicle->logPose(errorX);
-      vehicle->logEncoders();
-      Serial.println(" ");
     }
     
-  }else{//finished entire spline
+  }else{//finished entire arc
     finished();
     vehicle->logPose(vehicle->getX() + ROBOT_LENGTH * cos(vehicle->getTheta()));
 
@@ -1039,6 +834,7 @@ void interruptLEnc(void){
 void finished(void){
   if(!first_finished_flag){
     motor->mBreak();
+    front_servo->angle(-SERVO_BIAS_ANGLE);
     //Serial.println("finished");   
     first_finished_flag = true;
   }  
