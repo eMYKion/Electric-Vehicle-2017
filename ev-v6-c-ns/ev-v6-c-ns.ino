@@ -6,7 +6,7 @@
 
 #define TARGET_DISTANCE (10 + 0.02)
 #define CAN_DISTANCE 0.01  //0.2
-#define BIAS -0.030    //0.01
+#define BIAS 0    // -0.035
 
 //geometry
 #define ROBOT_WHEELBASE 0.21 //meters
@@ -36,7 +36,7 @@
 //circle setup
 #define SIDE (1 - CAN_DISTANCE/2 + BIAS)
 #define RADIUS_OF_CIRCLE ((pow(TARGET_DISTANCE, 2) + 4*pow(SIDE, 2))/(8*SIDE))
-#define SERVO_BIAS_ANGLE asin(ROBOT_WHEELBASE/RADIUS_OF_CIRCLE)
+#define SERVO_BIAS_ANGLE (asin(ROBOT_WHEELBASE/RADIUS_OF_CIRCLE) + 0.0397)
 #define STARTING_ROBOT_ANGLE (PI/2 - asin(TARGET_DISTANCE/2/RADIUS_OF_CIRCLE))
 
 //system pins
@@ -62,7 +62,7 @@ int loopCount = 0;
 
 #define K_P_VEL 120
 #define LOWER_CONST_SPEED 40
-#define MAX_MOTOR_ACCEL 100
+#define MAX_MOTOR_ACCEL 150
 #define MAX_SPEED 2
 #define HIGHER_CONST_SPEED 60
 
@@ -419,6 +419,10 @@ void Robot::recalibrateMeasures(double x, double y, double theta, double phi, do
   this->_prev_front_enc_ti = 0;//TODO
   this->_prev_l_enc_ti = l_enc_ticks;
   this->_prev_r_enc_ti = r_enc_ticks;
+
+  this->_front_enc->ticks = 0;
+  this->_r_enc->ticks = 0;
+  this->_l_enc->ticks = 0;
 }
 
 double Robot::getU(void){
@@ -701,7 +705,7 @@ void loop(){
 
     prevError = errorX;
   
-    double angleDesired = -(K_P_ARC_FOLLOW*errorX/(vehicle->getRobotVel() + 0.2) + K_D_ARC_FOLLOW*dError)/(vehicle->getRobotVel() + 0.2) - SERVO_BIAS_ANGLE;//atan(-errSERVO_BIAS_ANGLEorX / 0.20) + theta - PI/2;
+    double angleDesired = -(K_P_ARC_FOLLOW*errorX/(vehicle->getRobotVel() + 0.2) + K_D_ARC_FOLLOW*dError)/(vehicle->getRobotVel() + 0.3) - SERVO_BIAS_ANGLE;//atan(-errSERVO_BIAS_ANGLEorX / 0.20) + theta - PI/2;
     //TODO:: INVESTIGATE
     if(y >= TARGET_DISTANCE){
       finished();
